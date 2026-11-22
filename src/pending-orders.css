@@ -1,0 +1,143 @@
+.pending-orders .panel-heading,
+.order-toolbar,
+.order-tools,
+.order-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.order-toolbar {
+  padding: 12px 20px;
+  justify-content: space-between;
+}
+.order-toolbar p {
+  margin: 0;
+}
+.order-tools {
+  gap: 12px;
+}
+.orders-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.order-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 14px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--line);
+}
+.order-choice,
+.order-form-check {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+}
+.order-choice input,
+.order-form-check input {
+  flex: none;
+  width: 17px;
+  height: 17px;
+  margin: 0;
+  accent-color: var(--orange);
+}
+.order-info {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  overflow-wrap: anywhere;
+}
+.order-info strong {
+  font-size: 14px;
+  font-weight: 560;
+}
+.order-kind,
+.order-info small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+.order-kind {
+  margin-inline-start: 4px;
+}
+.order-terms {
+  font: 13px var(--mono);
+}
+.order-side {
+  font-family: inherit;
+  font-weight: 500;
+}
+.order-side.buy {
+  color: var(--green);
+}
+.order-side.sell,
+.order-error,
+.order-delete:hover {
+  color: #ffa8a3;
+}
+.order-controls {
+  justify-content: flex-end;
+  gap: 5px;
+}
+.order-error {
+  grid-column: 1 / -1;
+  margin: 4px 0 0 29px;
+  font-size: 13px;
+}
+.order-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 14px;
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+.order-form-wide {
+  grid-column: 1 / -1;
+}
+.order-form-grid .field input,
+.order-form-grid select {
+  min-width: 0;
+}
+.order-form-grid input[readonly] {
+  color: var(--muted);
+  background: #20252b;
+}
+.order-form-check {
+  font-size: 13px;
+}
+.order-form-grid p {
+  margin: 0;
+}
+.btn.order-confirm-delete {
+  border-color: #744244;
+  background: #402429;
+  color: #ffc3bd;
+}
+@media (max-width: 660px) {
+  .order-row,
+  .order-toolbar {
+    padding: 12px 14px;
+  }
+  .order-row {
+    gap: 7px;
+  }
+  .order-controls {
+    max-width: 98px;
+  }
+  .order-controls .tag {
+    max-width: 100%;
+    white-space: normal;
+    text-align: center;
+  }
+  .order-form-grid {
+    gap: 12px 8px;
+  }
+}

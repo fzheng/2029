@@ -1,0 +1,385 @@
+.pf-dialog {
+  --pf-surface: #171a1f;
+  --pf-line: #34383e;
+  --pf-text: #f0f1f3;
+  --pf-muted: #a2a8b2;
+  --pf-accent: #ff8752;
+  background: var(--pf-surface);
+  color: var(--pf-text);
+  width: min(555px, calc(100vw - 28px));
+  max-width: none;
+  max-height: min(90dvh, 880px);
+  padding: 0;
+  border: 1px solid #42474e;
+  border-radius: 14px;
+  font-family: Inter, system-ui, sans-serif;
+  line-height: 1.5;
+  box-shadow: 0 30px 120px #0009;
+  color-scheme: dark;
+  margin: auto;
+  overflow: auto;
+}
+.pf-dialog * {
+  box-sizing: border-box;
+}
+.pf-dialog::backdrop {
+  background: #07090cbd;
+  backdrop-filter: blur(3px);
+}
+.pf-dialog :is(h2, h3, p, fieldset) {
+  margin: 0;
+}
+.pf-dialog h2 {
+  font-size: 1.24rem;
+  font-weight: 650;
+  letter-spacing: -0.035em;
+  color: var(--pf-text);
+}
+.pf-dialog h3 {
+  font-size: 1.02rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--pf-text);
+}
+.pf-dialog-head,
+.pf-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 17px 24px;
+  background: var(--pf-surface);
+}
+.pf-dialog-head {
+  justify-content: space-between;
+  border-bottom: 1px solid var(--pf-line);
+}
+.pf-dialog-title,
+.pf-actions,
+.pf-muted-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pf-dialog-title > svg {
+  color: var(--pf-accent);
+}
+.pf-content {
+  display: grid;
+  gap: 17px;
+  padding: 22px 24px;
+}
+.pf-footer {
+  flex-direction: row;
+  justify-content: flex-end;
+  margin: 0;
+  border-top: 1px solid var(--pf-line);
+  position: sticky;
+  bottom: 0;
+}
+.pf-dialog button {
+  cursor: pointer;
+  font-family: inherit;
+}
+.pf-dialog button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.pf-button,
+.pf-type,
+.pf-link-button,
+.pf-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  font-size: 0.875rem;
+  font-weight: 540;
+  line-height: 1.3;
+  border-radius: 7px;
+}
+.pf-button,
+.pf-type {
+  color: var(--pf-text);
+  background: #22262c;
+  border: 1px solid var(--pf-line);
+  padding: 9px 13px;
+  min-height: 38px;
+}
+.pf-button:hover:not(:disabled),
+.pf-type:hover:not(:disabled) {
+  background: #2a2f35;
+  border-color: #50565d;
+}
+.pf-button.pf-primary {
+  color: #23150f;
+  background: var(--pf-accent);
+  border-color: var(--pf-accent);
+}
+.pf-button.pf-primary:hover:not(:disabled) {
+  background: #ff9e74;
+}
+.pf-icon-button {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid transparent;
+  color: var(--pf-muted);
+  background: transparent;
+}
+.pf-icon-button:hover,
+.pf-link-button:hover {
+  color: var(--pf-text);
+  background: #23272d;
+}
+.pf-link-button {
+  background: transparent;
+  border: 0;
+  color: var(--pf-accent);
+  padding: 6px 3px;
+  min-height: 30px;
+}
+.pf-footer .pf-archive {
+  margin-right: auto;
+  color: var(--pf-muted);
+}
+.pf-fieldset {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+}
+.pf-fieldset legend,
+.pf-field > span:first-child {
+  font-size: 0.83rem;
+  font-weight: 550;
+  color: #cdd1d6;
+}
+.pf-fieldset legend {
+  padding: 0 0 7px;
+}
+.pf-type-options {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+.pf-type {
+  flex-direction: column;
+  min-height: 62px;
+  gap: 6px;
+  font-size: 0.8rem;
+  background: #1c2025;
+  text-align: center;
+}
+.pf-type.selected {
+  border-color: #b96843;
+  background: #30241f;
+  color: #ffa87e;
+}
+.pf-field {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+.pf-input-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--pf-line);
+  background: #111419;
+  border-radius: 7px;
+  padding: 0 10px;
+}
+.pf-input-wrap:focus-within {
+  border-color: var(--pf-accent);
+  box-shadow: 0 0 0 1px #ff875240;
+}
+.pf-dialog input:not([type='file']),
+.pf-dialog select {
+  width: 100%;
+  min-width: 0;
+  height: 39px;
+  color: var(--pf-text);
+  border: none;
+  padding: 7px 2px;
+  background: transparent;
+  font-family: inherit;
+  font-size: 0.94rem;
+  outline: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+.pf-dialog input.pf-number {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.pf-input-wrap small {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 0.72rem;
+  color: var(--pf-muted);
+}
+.pf-dialog select {
+  appearance: auto;
+  padding: 7px 10px;
+  border: 1px solid var(--pf-line);
+  background: #111419;
+  border-radius: 7px;
+}
+.pf-dialog :is(select, button, summary):focus-visible {
+  outline: 2px solid #ffa87e;
+  outline-offset: 2px;
+}
+.pf-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.pf-section {
+  border-top: 1px solid var(--pf-line);
+  padding-top: 8px;
+}
+.pf-section > legend {
+  font-size: 0.95rem;
+  color: var(--pf-text);
+  padding: 0 10px 2px 0;
+}
+.pf-section > :not(legend) + * {
+  margin-top: 11px;
+}
+.pf-holding {
+  display: grid;
+  grid-template-columns: 1fr 1.2fr 32px;
+  gap: 9px;
+  align-items: end;
+}
+.pf-remove {
+  align-self: end;
+  margin-bottom: 3px;
+}
+.pf-hint,
+.pf-type-label,
+.pf-body-copy,
+.pf-muted-line,
+.pf-tier-info {
+  color: var(--pf-muted);
+  font-size: 0.87rem;
+}
+.pf-dialog .pf-field + .pf-hint {
+  margin-top: -10px;
+}
+.pf-section .pf-field + .pf-hint {
+  margin-top: 6px;
+}
+.pf-details {
+  border-top: 1px solid var(--pf-line);
+  padding-top: 12px;
+}
+.pf-details summary {
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 0.86rem;
+  color: var(--pf-muted);
+}
+.pf-details[open] summary {
+  margin-bottom: 9px;
+}
+.pf-tier-info,
+.pf-settings-heading,
+.pf-records li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.pf-error {
+  color: #ffab9e;
+  border: 1px solid #723d33;
+  background: #33211f;
+  border-radius: 6px;
+  padding: 8px 11px;
+  font-size: 0.86rem;
+}
+.pf-settings {
+  gap: 20px;
+}
+.pf-settings section {
+  display: grid;
+  justify-items: start;
+  gap: 9px;
+}
+.pf-settings section + section {
+  padding-top: 18px;
+  border-top: 1px solid var(--pf-line);
+}
+.pf-settings .pf-settings-heading,
+.pf-records {
+  width: 100%;
+}
+.pf-settings-heading > span {
+  color: var(--pf-muted);
+  font-size: 0.82rem;
+}
+.pf-records {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.pf-records li {
+  padding: 7px 0;
+}
+.pf-records strong,
+.pf-records span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.pf-records strong {
+  font-size: 0.9rem;
+}
+.pf-records span {
+  color: var(--pf-muted);
+  font-size: 0.79rem;
+}
+.pf-file {
+  display: none;
+}
+.pf-danger-outline {
+  color: #ffac9e;
+  background: transparent;
+  border-color: #654039;
+}
+.pf-danger {
+  color: white;
+  background: #983c2e;
+  border-color: #b84b3b;
+}
+.pf-danger:hover:not(:disabled) {
+  background: #ac4538;
+}
+@media (max-width: 500px) {
+  .pf-type-options {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .pf-content {
+    padding: 17px;
+    gap: 14px;
+  }
+  .pf-dialog-head,
+  .pf-footer {
+    padding: 13px 17px;
+  }
+  .pf-type {
+    padding: 8px 3px;
+    font-size: 0.75rem;
+  }
+  .pf-holding {
+    grid-template-columns: 1fr 1.1fr 26px;
+    gap: 6px;
+  }
+  .pf-footer .pf-button {
+    padding-inline: 9px;
+  }
+  .pf-dialog input:not([type='file']),
+  .pf-dialog select {
+    font-size: 1rem;
+  }
+}
