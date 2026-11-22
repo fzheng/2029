@@ -30,6 +30,7 @@ export const fieldLabel = (name: FieldName) => translate(name, fieldNames[name])
 
 const messages = {
   'Give this account a name.': '请输入账户名称。',
+  'Enter a debt amount such as 1500 or -1,500.00.': '请输入有效的欠款金额，例如 1500 或 -1,500.00。',
   'Enter a Bitget asset symbol for each holding or position.':
     '请为每项持仓输入有效的 Bitget 币种代码。',
   'Warning LTV must be below liquidation LTV, and neither can exceed 100%.':
@@ -49,6 +50,9 @@ const messages = {
     '请先移除此账户中的挂单，再修改合约标的或账户类型。',
   'Check the pending order values and account before saving.': '请检查挂单参数和所属账户后再保存。',
   'Enter a name and valid inputs before saving.': '请输入名称和有效数值后再保存。',
+  'Confirm which saved plan to overwrite.': '请确认要覆盖的已存方案。',
+  'The selected plan no longer matches this name.': '所选方案与输入的名称不再匹配。',
+  'This saved plan no longer exists.': '此方案已被删除。',
   'Choose a 2029 version 1 JSON backup.': '请选择 2029 第 1 版格式的 JSON 备份文件。',
   'The backup contains invalid or duplicate records. Your portfolio is unchanged.':
     '备份中有无效或重复的记录，未导入任何数据。',

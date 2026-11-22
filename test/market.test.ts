@@ -1,7 +1,8 @@
-import test from 'node:test'
+import test, { type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   cachedQuotes,
+  fetchCandles,
   fetchContractTerms,
   fetchPledgeTerms,
   fetchQuotes,
@@ -9,7 +10,7 @@ import {
   savedCandles,
 } from '../src/market'
 
-test('Bitget keeps decimal spot, mark and loan index prices separate and reports stale or missing bases', async (t) => {
+function useMemoryStorage(t: TestContext) {
   const values = new Map<string, string>()
   const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
   Object.defineProperty(globalThis, 'localStorage', {
@@ -23,6 +24,11 @@ test('Bitget keeps decimal spot, mark and loan index prices separate and reports
     if (original) Object.defineProperty(globalThis, 'localStorage', original)
     else Reflect.deleteProperty(globalThis, 'localStorage')
   })
+  return values
+}
+
+test('Bitget keeps decimal spot, mark and loan index prices separate and reports stale or missing bases', async (t) => {
+  useMemoryStorage(t)
   const now = Date.now()
   let offline = false
   let partial = false
@@ -187,4 +193,121 @@ test('pledge terms reject missing products, invalid published limits, invalid ra
   collateralRows = [pledge]
   offline = true
   await assert.rejects(fetchPledgeTerms('SOL'), /offline/)
+})
+
+test('older or future ticks cannot replace a usable quote, and an aborted refresh leaves the cache intact', async (t) => {
+  useMemoryStorage(t)
+  const now = Date.UTC(2026, 0, 10, 12)
+  t.mock.method(Date, 'now', () => now)
+  let time = now
+  let value = '20'
+  const fetcher = t.mock.method(globalThis, 'fetch', async (input: string, init: RequestInit) => {
+    init.signal?.throwIfAborted()
+    const spot = input.endsWith('category=SPOT')
+    const tick = spot ? { lastPrice: value } : { markPrice: value, indexPrice: value }
+    const data = [{ symbol: 'HYPEUSDT', ...tick, ts: String(time) }]
+    return Response.json({ code: '00000', data, requestTime: now })
+  })
+  const live = await fetchQuotes([' hype '])
+  assert.equal(live.prices.HYPE, 20)
+  assert.deepEqual(live.stale, [])
+  value = '1'
+  for (time of [now - 1000, now + 180_000]) {
+    const outdated = await fetchQuotes(['HYPE'])
+    assert.deepEqual(outdated.book, live.book)
+    assert.equal(outdated.asOf, new Date(now).toISOString())
+    assert.deepEqual(outdated.stale, ['spot:HYPE', 'mark:HYPE', 'loan:HYPE'])
+  }
+
+  const reason = new Error('Superseded by a newer refresh')
+  const previousCalls = fetcher.mock.callCount()
+  await assert.rejects(fetchQuotes(['HYPE'], AbortSignal.abort(reason)), (error) => error === reason)
+  const abortedRequests = fetcher.mock.calls.slice(previousCalls)
+  assert.ok(abortedRequests.every((call) => String(call.arguments[0]).startsWith('/bitget/')))
+  assert.deepEqual(cachedQuotes(['HYPE']).book, live.book)
+})
+
+test('chart history falls back to the public feed, preserves the last good series, and measures candle age', async (t) => {
+  useMemoryStorage(t)
+  const hour = 3_600_000
+  const now = Date.UTC(2026, 0, 10, 12)
+  t.mock.method(Date, 'now', () => now)
+  let requestTime = now
+  let data = [[String(now - hour), '10', '14', '9', '12', '30']]
+  const requests: string[] = []
+  t.mock.method(globalThis, 'fetch', async (input: string) => {
+    requests.push(input)
+    if (input.startsWith('/bitget/')) return new Response(null, { status: 503 })
+    return Response.json({ code: '00000', data, requestTime })
+  })
+  const fresh = await fetchCandles(' hype ', '1H')
+  assert.deepEqual(fresh.bars, [
+    { time: (now - hour) / 1000, open: 10, high: 14, low: 9, close: 12, volume: 30 },
+  ])
+  assert.equal(fresh.status, 'live')
+  assert.equal(fresh.asOf, now)
+  assert.equal(requests.length, 2)
+  const fallback = new URL(requests[1])
+  assert.equal(fallback.origin, 'https://api.bitget.com')
+  assert.equal(fallback.searchParams.get('symbol'), 'HYPEUSDT')
+  assert.equal(fallback.searchParams.get('interval'), '1H')
+  assert.deepEqual(savedCandles('HYPE', '1H'), { bars: fresh.bars, asOf: now, status: 'stale' })
+  assert.equal(savedCandles('HYPE', '4H'), undefined)
+
+  // A new envelope may contain an old bar, or an old envelope may contain a current bar.
+  data = [[String(now - 2 * hour), '10', '14', '9', '11', '30']]
+  assert.equal((await fetchCandles('HYPE', '1H')).status, 'stale')
+  data = [[String(now - hour), '10', '14', '9', '13', '30']]
+  requestTime = now - 3 * 60_000
+  const lastGood = await fetchCandles('HYPE', '1H')
+  assert.equal(lastGood.status, 'stale')
+  assert.equal(lastGood.bars[0].close, 13)
+  data = []
+  await assert.rejects(fetchCandles('HYPE', '1H'), /No candles available/)
+  assert.deepEqual(savedCandles('HYPE', '1H'), {
+    bars: lastGood.bars, asOf: requestTime, status: 'stale',
+  })
+})
+
+test('invalid market symbols and incomplete contract settings are rejected', async (t) => {
+  let contracts = [{ symbol: 'BTCUSDT', takerFeeRate: '0.0006' }]
+  let tiers = [{ startUnit: '0', endUnit: '1000', keepMarginRate: '0.005' }]
+  const fetcher = t.mock.method(globalThis, 'fetch', async (input: string) =>
+    Response.json({
+      code: '00000',
+      data: input.includes('query-position-lever') ? tiers : contracts,
+      requestTime: Date.UTC(2026, 0, 10),
+    }),
+  )
+  await assert.rejects(fetchCandles('BTC/USDT', '1D'), /Choose a Bitget spot market/)
+  await assert.rejects(fetchContractTerms('BTC/USDT'), /Choose a Bitget perpetual symbol/)
+  assert.equal(fetcher.mock.callCount(), 0)
+  await assert.rejects(fetchContractTerms('ETH'), /contract settings unavailable/)
+  contracts = [{ symbol: 'ETHUSDT', takerFeeRate: '0.0006' }]
+  tiers = []
+  await assert.rejects(fetchContractTerms('ETH'), /contract settings unavailable/)
+  tiers = [{ startUnit: '0', endUnit: '1000', keepMarginRate: 'unavailable' }]
+  await assert.rejects(fetchContractTerms('ETH'), /Incomplete Bitget tier schedule/)
+})
+
+test('a corrupt or unwritable quote cache still permits valuation from a successful sweep', async (t) => {
+  const values = useMemoryStorage(t)
+  const now = Date.UTC(2026, 0, 10, 12)
+  t.mock.method(Date, 'now', () => now)
+  t.mock.method(globalThis, 'fetch', async (input: string) => {
+    const data = input.endsWith('category=SPOT')
+      ? [{ symbol: 'SOLUSDT', lastPrice: '150', ts: String(now) }]
+      : [{ symbol: 'SOLUSDT', markPrice: '151', indexPrice: '149', ts: String(now) }]
+    return Response.json({ code: '00000', data, requestTime: now })
+  })
+  const initial = await fetchQuotes(['SOL'])
+  for (const key of values.keys()) values.set(key, '{malformed')
+  t.mock.method(localStorage, 'setItem', () => {
+    throw new Error('Storage quota exceeded')
+  })
+  assert.deepEqual(cachedQuotes(['SOL']).missing, ['spot:SOL', 'mark:SOL', 'loan:SOL'])
+  const refreshed = await fetchQuotes(['SOL'])
+  assert.deepEqual(refreshed.book, initial.book)
+  assert.deepEqual(refreshed.stale, [])
+  assert.deepEqual(cachedQuotes(['SOL']).missing, ['spot:SOL', 'mark:SOL', 'loan:SOL'])
 })

@@ -66,15 +66,17 @@ test('ordinary spot holdings use spot prices, par USDT, no debt, funding interes
     { asset: 'ETH', quantity: '1' },
   ])
   const live = evaluate([wallet], book)
-  assert.deepEqual([live.equity, live.exposure, live.leverage, live.debt], [490, 490, 1, 0])
+  assert.deepEqual([live.equity, live.exposure, live.leverage, live.debt], [490, 490, null, 0])
   const r = live.accounts[0]
+  assert.equal(r.leverage, 1)
   assert.deepEqual(
     [r.warningPrice, r.liquidationPrice, r.ltv, r.maintenance, r.distancePct],
     [null, null, null, null, null],
   )
   const stressed = evaluate([wallet], buildScenario(book, 'Severe', { BTC: '100' }), 'Severe')
   assert.equal(stressed.equity, 50)
-  assert.equal(stressed.leverage, 1)
+  assert.equal(stressed.leverage, null)
+  assert.equal(stressed.accounts[0].leverage, 1)
   assert.deepEqual([stressed.firstWarning, stressed.firstLiquidation], [null, null])
   assert.deepEqual(wallet, saved)
   assert.deepEqual(planCash([wallet], book, target).actions, [])

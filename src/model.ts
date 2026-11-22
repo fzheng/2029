@@ -114,6 +114,12 @@ export function orderMatchesAccount(order: PendingOrder, account: Account | unde
 
 export type Basis = 'spot' | 'mark' | 'loan'
 export type Path = 'Independent' | 'Base' | 'Severe'
+/** Stress assumptions applied to the BTC percentage move. Unlisted assets stay flat. */
+export const btcMoveMultipliers: Readonly<Record<Path, Readonly<Record<string, string>>>> = {
+  Independent: {},
+  Base: { ETH: '1.5', SOL: '1.7', BNB: '1.0', HYPE: '1.7' },
+  Severe: { ETH: '2.5', SOL: '3.0', BNB: '1.5', HYPE: '3.0' },
+}
 export type Prices = Record<string, string>
 export interface PriceBook {
   spot: Prices
@@ -132,9 +138,17 @@ export interface PledgeInput {
   minCollateralUsdt?: string
   maxCollateralUsdt?: string
 }
+export interface PlanSnapshot {
+  book: PriceBook
+  /** Copied altcoin endpoints. The planner's editable target supplies BTC. */
+  overrides: Prices
+  asOf: string | null
+  stale?: string[]
+}
 export interface PlanInput {
   target: string
   path: Path
+  snapshot?: PlanSnapshot
   bufferPct?: string
   budget?: string
   accountId?: string

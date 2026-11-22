@@ -1,4 +1,5 @@
 import { Decimal } from 'decimal.js'
+import { btcMoveMultipliers } from './model'
 import type {
   Account,
   CashSpotAccount,
@@ -9,6 +10,7 @@ import type {
   Path,
   PerpAccount,
   PlanInput,
+  PlanSnapshot,
   PriceBook,
   Prices,
   SpotAccount,
@@ -24,10 +26,6 @@ const spotMaintenance = d('0.10')
 const spotAlert = d('0.65') // personal threshold; the exchange's margin call is 0.80
 const perpAlert = d('0.80')
 const bases: Basis[] = ['spot', 'mark', 'loan']
-const weights: Record<Exclude<Path, 'Independent'>, Record<string, string>> = {
-  Base: { ETH: '1.5', SOL: '1.7', BNB: '1' },
-  Severe: { ETH: '2.5', SOL: '3', BNB: '1.5' },
-}
 const number = (v: Decimal | null) => (v === null ? null : v.toNumber())
 const sum = (items: Decimal[]) => items.reduce((a, b) => a.plus(b), zero)
 const riskRatio = (required: Decimal, equity: Decimal) =>
@@ -56,10 +54,16 @@ export function referencePrice(book: PriceBook, asset: string): string | null {
 
 function multiplier(path: Path, asset: string) {
   if (asset === 'BTC') return one
-  return d(path === 'Independent' ? 0 : (weights[path][asset] ?? 0))
+  return d(btcMoveMultipliers[path][asset] ?? 0)
 }
 function linkedFactor(weight: Decimal, btcFactor: Decimal) {
   return D.max(0, one.plus(weight.mul(btcFactor.minus(1))))
+}
+// Invert the linked move against its original basis. A zero threshold is
+// first touched when the linked asset reaches its price floor.
+function driverPriceAtThreshold(driver: Decimal, original: Decimal, threshold: Decimal, weight: Decimal) {
+  const factor = one.plus(threshold.div(original).minus(1).div(weight))
+  return factor.isNegative() ? null : driver.mul(factor)
 }
 
 interface ScenarioContext {
@@ -182,10 +186,14 @@ function perpAmounts(account: PerpAccount, mark: Decimal) {
   const maintenance = D.max(0, notional.mul(tier.rate.plus(account.takerFee)).minus(tier.offset))
   return { notional, equity, maintenance }
 }
-function perpTrigger(account: PerpAccount, threshold: Decimal) {
+function perpThresholdMarks(account: PerpAccount, threshold: Decimal) {
   const direction = account.side === 'long' ? one : d(-1)
   const size = d(account.size)
   const tiers = positionTiers(account)
+  const marks: Decimal[] = []
+  const zeroEquityMark = d(account.entry).minus(d(account.margin).div(size).mul(direction))
+  if (zeroEquityMark.gte(0) && perpAmounts(account, zeroEquityMark).maintenance.isZero())
+    marks.push(zeroEquityMark)
   for (const [i, t] of tiers.entries()) {
     // threshold × equity = maintenance, solved at the rate of the candidate tier.
     const denominator = size.mul(t.rate.plus(account.takerFee).minus(direction.mul(threshold)))
@@ -196,9 +204,33 @@ function perpTrigger(account: PerpAccount, threshold: Decimal) {
       .plus(t.offset)
     const p = numerator.div(denominator)
     const n = p.mul(size)
-    if (p.gte(0) && n.gte(t.min) && (!tiers[i + 1] || n.lte(tiers[i + 1].min))) return p
+    if (
+      p.gte(0) &&
+      n.gte(t.min) &&
+      (!tiers[i + 1] || n.lte(tiers[i + 1].min)) &&
+      n.mul(t.rate.plus(account.takerFee)).gte(t.offset)
+    ) {
+      marks.push(p)
+    }
   }
-  return null
+  return marks
+}
+function perpTrigger(account: PerpAccount, threshold: Decimal) {
+  return perpThresholdMarks(account, threshold)[0] ?? null
+}
+
+function btcLiquidationPrice(account: Account, book: PriceBook, path: Path, native: Decimal | null) {
+  if (native === null || account.kind === 'cashSpot') return null
+  if (account.kind === 'spot') return native // spotTrigger already solves across the whole account in BTC.
+  const context = contexts.get(book)
+  const frozen = context?.path === path ? context : undefined
+  if (account.asset !== 'BTC' && frozen?.overrides[account.asset] !== undefined) return null
+  const source = frozen?.snapshot ?? book
+  const btc = referencePrice(source, 'BTC')
+  const original = price(source, account.kind === 'perp' ? 'mark' : 'loan', account.asset)
+  const weight = multiplier(path, account.asset)
+  if (btc === null || !d(btc).gt(0) || !original?.gt(0) || weight.isZero()) return null
+  return driverPriceAtThreshold(d(btc), original, native, weight)
 }
 
 export type RiskStatus = 'Safe' | 'Warning' | 'Liquidation' | 'Unpriced'
@@ -208,6 +240,7 @@ export interface AccountRisk {
   missing: string[]
   triggerAsset: string
   equity: number | null
+  equityAtTrigger: number | null
   debt: number
   exposure: number | null
   gross: number | null
@@ -218,6 +251,8 @@ export interface AccountRisk {
   referencePrice: number | null
   warningPrice: number | null
   liquidationPrice: number | null
+  /** BTC anchor price at the liquidation boundary along the selected BTC path, in USDT. */
+  btcLiquidationPrice: number | null
   distancePct: number | null
   warningDistancePct: number | null
   assetBoundary: number | null
@@ -328,6 +363,7 @@ function accountRisk(account: Account, book: PriceBook, path: Path) {
     missing,
     triggerAsset,
     equity: number(equity),
+    equityAtTrigger: null,
     debt: number(debt)!,
     gross: number(gross),
     exposure: number(exposure),
@@ -338,6 +374,7 @@ function accountRisk(account: Account, book: PriceBook, path: Path) {
     referencePrice: number(reference),
     warningPrice: number(warn),
     liquidationPrice: number(liq),
+    btcLiquidationPrice: number(btcLiquidationPrice(account, book, path, liq)),
     distancePct: number(distance(liq)),
     warningDistancePct: number(distance(warn)),
     assetBoundary: number(boundary),
@@ -352,6 +389,9 @@ export interface RiskEvent {
   asset: string
   price: number | null
   distancePct: number
+  basis?: Basis
+  pathPoint?: { asset: string; price: number }
+  atSnapshot?: boolean
 }
 function firstEvent(rows: AccountRisk[], warning: boolean): RiskEvent | null {
   let closest: RiskEvent | null = null
@@ -408,26 +448,24 @@ function spotCrossingLabel(
   const trigger = boundary.minus(fixedValue).div(quantity)
   return trigger.lt(0) ? gross : { asset, price: trigger.toNumber() }
 }
-// A stress move can cross more than one account's trigger. Rank crossings by
-// their order along the move, even if both endpoints finish beyond liquidation.
-function scenarioCrossings(
-  rows: AccountRisk[],
-  book: PriceBook,
-  context: ScenarioContext,
-  warning: boolean,
-) {
-  const crossedIds = new Set<string>()
-  if (!Object.keys(context.overrides).length) return { first: null, crossedIds }
+// Manual prices move linearly to their overrides. A linked price can reach zero
+// before the end, changing the slope of a margin account's combined collateral.
+function scenarioPath(book: PriceBook, context: ScenarioContext) {
   const { snapshot, overrides, path } = context
   const fromBtc = referencePrice(snapshot, 'BTC')
   const move =
     fromBtc && d(fromBtc).gt(0) && overrides.BTC !== undefined
       ? d(overrides.BTC).div(fromBtc).minus(1)
       : zero
-  const touched = [zero, one]
-  for (const asset of ['ETH', 'SOL', 'BNB']) {
-    const change = multiplier(path, asset).mul(move)
-    if (change.lt(-1) && overrides[asset] === undefined) touched.push(one.neg().div(change))
+  const stops = [zero, one]
+  const linkedWeights = new Set(
+    Object.entries(btcMoveMultipliers[path])
+      .filter(([asset]) => overrides[asset] === undefined && referencePrice(snapshot, asset) !== null)
+      .map(([, weight]) => weight),
+  )
+  for (const weight of linkedWeights) {
+    const change = d(weight).mul(move)
+    if (change.lt(-1)) stops.push(one.neg().div(change))
   }
   const samples = new Map<string, PriceBook>([
     ['0', snapshot],
@@ -447,6 +485,60 @@ function scenarioCrossings(
     samples.set(key, sample)
     return sample
   }
+  return { book, context, stops: stops.sort((a, b) => a.cmp(b)), bookAt }
+}
+
+// A single manually moved asset defines a continuation. Independent moves in
+// multiple assets have no unique next price once their selected targets are met.
+function scenarioDirection(context: ScenarioContext) {
+  const axes = Object.entries(context.overrides).flatMap(([asset, target]) => {
+    const ref = referencePrice(context.snapshot, asset)
+    if (asset === 'USDT' || ref === null || d(ref).lte(0) || d(ref).eq(target)) return []
+    return [{ asset, ref: d(ref), target: d(target), falling: d(target).lt(ref) }]
+  })
+  return axes.length === 1 ? axes[0] : null
+}
+type ScenarioDirection = NonNullable<ReturnType<typeof scenarioDirection>>
+
+// Scan the rest of the same price path, using the frozen snapshot throughout.
+// A decline ends at zero. On a rise only perpetuals can newly breach a
+// threshold; scan past their possible marks, converted to the driving asset.
+function remainingPath(rows: AccountRisk[], context: ScenarioContext, direction: ScenarioDirection) {
+  const { asset, ref, target, falling } = direction
+  let end = zero
+  if (!falling) {
+    end = target
+    for (const { account } of rows) {
+      if (account.kind !== 'perp' || d(account.size).isZero()) continue
+      const linked = asset === 'BTC' && context.overrides[account.asset] === undefined
+      const weight = account.asset === asset ? one : linked ? multiplier(context.path, account.asset) : zero
+      const originalMark = price(context.snapshot, 'mark', account.asset)
+      if (weight.isZero() || !originalMark?.gt(0)) continue
+      const marks = [...perpThresholdMarks(account, one), ...perpThresholdMarks(account, perpAlert)]
+      for (const mark of marks) {
+        const driverPrice = driverPriceAtThreshold(ref, originalMark, mark, weight)
+        if (driverPrice?.gt(target)) end = D.max(end, driverPrice.plus(ref))
+      }
+    }
+  }
+  if (end.eq(target)) return null
+  const overrides = { ...context.overrides, [asset]: end.toFixed() }
+  const book = buildScenario(context.snapshot, context.path, overrides)
+  return scenarioPath(book, { ...context, overrides })
+}
+
+// A stress move can cross more than one account's trigger. Rank crossings by
+// their order along the move, even if both endpoints finish beyond liquidation.
+function scenarioCrossings(
+  rows: AccountRisk[],
+  move: ReturnType<typeof scenarioPath>,
+  direction: ScenarioDirection | null,
+  warning: boolean,
+) {
+  // null means the position was already beyond its threshold at the snapshot.
+  const crossings = new Map<string, Decimal | null>()
+  const { book, context, bookAt } = move
+  const { snapshot, path } = context
   let earliest: Decimal | null = null,
     event: RiskEvent | null = null
   for (const row of rows) {
@@ -470,18 +562,26 @@ function scenarioCrossings(
       return v.equity.mul(threshold).minus(v.maintenance)
     }
     // Within a price-floor/tier interval both equity and maintenance are linear.
-    const stops = [...touched].sort((a, b) => a.cmp(b))
-    if (a.kind === 'perp' && a.tiers?.length) {
-      const tiers = positionTiers(a).slice(1)
+    const stops = [...move.stops]
+    if (a.kind === 'perp') {
+      const tiers = positionTiers(a)
+      const boundaries = tiers.slice(1).map((t) => t.min)
+      for (const [index, tier] of tiers.entries()) {
+        const rate = tier.rate.plus(a.takerFee)
+        if (rate.isZero() || tier.offset.isZero()) continue
+        const floor = tier.offset.div(rate)
+        if (floor.gt(tier.min) && (!tiers[index + 1] || floor.lt(tiers[index + 1].min)))
+          boundaries.push(floor)
+      }
       const segments = [...stops]
       for (let i = 1; i < segments.length; i++) {
         const start = segments[i - 1],
           end = segments[i]
         const startN = price(bookAt(start), 'mark', a.asset)!.mul(a.size)
         const endN = price(bookAt(end), 'mark', a.asset)!.mul(a.size)
-        for (const tier of tiers)
-          if (tier.min.gt(D.min(startN, endN)) && tier.min.lt(D.max(startN, endN))) {
-            stops.push(start.plus(tier.min.minus(startN).div(endN.minus(startN)).mul(end.minus(start))))
+        for (const boundary of boundaries)
+          if (boundary.gt(D.min(startN, endN)) && boundary.lt(D.max(startN, endN))) {
+            stops.push(start.plus(boundary.minus(startN).div(endN.minus(startN)).mul(end.minus(start))))
           }
       }
       stops.sort((x, y) => x.cmp(y))
@@ -491,10 +591,10 @@ function scenarioCrossings(
     for (const end of stops) {
       const room = headroom(bookAt(end))
       if (room.lte(0)) {
-        crossedIds.add(a.id)
         const fraction = previousRoom.lte(0)
           ? previous
           : previous.plus(end.minus(previous).mul(previousRoom).div(previousRoom.minus(room)))
+        crossings.set(a.id, fraction.isZero() && previousRoom.lt(0) ? null : fraction)
         if (earliest === null || fraction.lt(earliest)) {
           earliest = fraction
           const sample = bookAt(fraction)
@@ -512,7 +612,14 @@ function scenarioCrossings(
               : number(price(sample, a.kind === 'loan' ? 'loan' : 'mark', a.asset))
             label = { asset: a.asset, price: trigger }
           }
-          event = { id: a.id, name: a.name, ...label, distancePct: 0 }
+          event = { id: a.id, name: a.name, ...label, distancePct: 0, atSnapshot: atStart }
+          if (a.kind !== 'spot') event.basis = a.kind === 'loan' ? 'loan' : 'mark'
+          if (direction && !atStart) {
+            event.pathPoint = {
+              asset: direction.asset,
+              price: Number(referencePrice(sample, direction.asset)),
+            }
+          }
         }
         break
       }
@@ -520,24 +627,36 @@ function scenarioCrossings(
       previousRoom = room
     }
   }
-  return { first: event, crossedIds }
+  return { first: event, crossings }
 }
-export function evaluate(accounts: Account[], book: PriceBook, path: Path = 'Base') {
+export function evaluate(accounts: Account[], book: PriceBook, path: Path = contexts.get(book)?.path ?? 'Base') {
   const values = accounts.filter((a) => !a.archived).map((a) => accountRisk(a, book, path))
   const rows = values.map((v) => v.row)
   const missing = [...new Set(rows.flatMap((r) => r.missing))]
   const context = contexts.get(book)
-  const liquidations = context && scenarioCrossings(rows, book, context, false)
-  const firstLiquidation = liquidations?.first ?? firstEvent(rows, false)
-  const firstWarning =
-    (context && scenarioCrossings(rows, book, context, true).first) ?? firstEvent(rows, true)
+  const move = context && scenarioPath(book, context)
+  const direction = context ? scenarioDirection(context) : null
+  const liquidations = move && scenarioCrossings(rows, move, direction, false)
+  const warnings = move && scenarioCrossings(rows, move, direction, true)
+  const remaining = context && direction && remainingPath(rows, context, direction)
+  const nextEvent = (observed: typeof liquidations, warning: boolean) => {
+    if (!remaining || !observed) return null
+    const pending = rows.filter((row) => !observed.crossings.has(row.account.id))
+    return scenarioCrossings(pending, remaining, direction, warning).first
+  }
+  const nextWarning = nextEvent(warnings, true)
+  const nextLiquidation = nextEvent(liquidations, false)
 
   // Settle each crossed position before summing the portfolio. A sibling position
   // can keep its equity even when this one would have a negative mark-to-market value.
-  if (liquidations) {
+  if (liquidations && move && context) {
     for (const value of values) {
       const row = value.row
-      if (row.status !== 'Liquidation' && !liquidations.crossedIds.has(row.account.id)) continue
+      if (row.status !== 'Liquidation' && !liquidations.crossings.has(row.account.id)) continue
+      const fraction = liquidations.crossings.get(row.account.id)
+      if (fraction != null) {
+        row.equityAtTrigger = number(accountRisk(row.account, move.bookAt(fraction), context.path).equity)
+      }
       value.equity = zero
       value.exposure = zero
       row.status = 'Liquidation'
@@ -554,15 +673,25 @@ export function evaluate(accounts: Account[], book: PriceBook, path: Path = 'Bas
   }
   const equity = missing.length ? null : sum(values.map((v) => v.equity!))
   const exposure = missing.length ? null : sum(values.map((v) => v.exposure!))
+  const marginAndLoans = values.filter(({ row }) => row.account.kind !== 'cashSpot')
+  const leveragedEquity = marginAndLoans.some(({ row }) => row.missing.length > 0)
+    ? null
+    : sum(marginAndLoans.map((v) => v.equity!))
+  const leverage = leveragedEquity?.gt(0)
+    ? sum(marginAndLoans.map((v) => v.exposure!)).div(leveragedEquity).toNumber()
+    : null
   return {
     accounts: rows,
     equity: number(equity),
     debt: sum(values.map((v) => v.debt)).toNumber(),
     exposure: number(exposure),
-    leverage: equity?.gt(0) && exposure !== null ? exposure.div(equity).toNumber() : null,
+    leverage,
     missing,
-    firstWarning,
-    firstLiquidation,
+    firstWarning: warnings ? warnings.first : firstEvent(rows, true),
+    firstLiquidation: liquidations ? liquidations.first : firstEvent(rows, false),
+    nextWarning,
+    nextLiquidation,
+    direction: direction ? { asset: direction.asset, falling: direction.falling } : null,
   }
 }
 
@@ -602,7 +731,7 @@ export interface CashAction {
   targetPrice: number | null
   beforeLiquidation: number | null
   afterLiquidation: number | null
-  /** Transfer the saved position needs to survive both the starting and buffered target prices. */
+  /** Transfer the saved position needs to survive the path through the buffered target. */
   required: number | null
   /** Planned USDT from all sources, in the destination's executable increments. */
   allocated: number | null
@@ -797,12 +926,29 @@ function drawSources(pools: FundingPool[], transfer: Decimal) {
   return { sources, external }
 }
 
+export function planFromScenario(scenario: PlanSnapshot & { path: Path }): PlanInput {
+  const { BTC, USDT: _usdt, ...altcoins } = scenario.overrides
+  const target = BTC ?? referencePrice(scenario.book, 'BTC')
+  return {
+    target: target == null ? '' : d(target).toFixed(),
+    path: scenario.path,
+    useSpotUsdt: true,
+    snapshot: structuredClone({
+      book: scenario.book,
+      asOf: scenario.asOf,
+      stale: scenario.stale,
+      overrides: altcoins,
+    }),
+  }
+}
+
 export function planCash(
   accounts: Account[],
-  liveBook: PriceBook,
+  currentBook: PriceBook,
   input: PlanInput,
   staleKeys: readonly string[] = [],
 ) {
+  const liveBook = input.snapshot?.book ?? currentBook
   const priority = { spot: 0, loan: 1, perp: 2 }
   const active = accounts.filter((a) => !a.archived)
   const selected = active
@@ -824,7 +970,15 @@ export function planCash(
       needed.add((a.kind === 'loan' ? 'loan:' : 'mark:') + a.asset)
   }
   for (const p of input.pledges ?? []) needed.add('loan:' + p.asset)
-  const stale = staleKeys.filter((k) => needed.has(k))
+  const symbols = new Set([...needed].map((key) => key.split(':')[1]))
+  const overrides = input.snapshot?.overrides ?? {}
+  for (const asset of symbols) {
+    if (overrides[asset] === undefined) continue
+    const anchor = bases.find((basis) => liveBook[basis][asset] !== undefined)
+    if (anchor) needed.add(anchor + ':' + asset)
+  }
+  const stale = (input.snapshot ? input.snapshot.stale ?? [] : staleKeys).filter((k) => needed.has(k))
+  const references: { basis: Basis; asset: string; start: number | null; end: number | null }[] = []
   const actions: CashAction[] = []
   const missing = new Set<string>()
   const invalid = (message: string) => ({
@@ -838,6 +992,7 @@ export function planCash(
     spotUsdtUsed: null,
     newDebt: null,
     pledges: [] as PledgeResult[],
+    references,
     actions,
     stale,
     missing: [message],
@@ -859,7 +1014,30 @@ export function planCash(
         .mul(descending ? -1 : 1),
     ),
   )
-  const targetBook = buildScenario(liveBook, input.path, { BTC: target.toFixed() })
+  // The frozen market can include every Bitget pair. Only these quotes enter the calculation.
+  const startBook: PriceBook = { spot: {}, loan: {}, mark: {} }
+  for (const basis of bases)
+    for (const asset of symbols) {
+      const quote = liveBook[basis][asset]
+      if (quote !== undefined) startBook[basis][asset] = quote
+    }
+  const move = {
+    path: input.path,
+    snapshot: startBook,
+    overrides: { ...overrides, BTC: target.toFixed() },
+  }
+  const targetBook = buildScenario(startBook, input.path, move.overrides)
+  const path = scenarioPath(targetBook, move)
+  const pathBooks = path.stops.map(path.bookAt)
+  for (const key of needed) {
+    const [basis, asset] = key.split(':') as [Basis, string]
+    references.push({
+      basis,
+      asset,
+      start: number(price(startBook, basis, asset)),
+      end: number(price(targetBook, basis, asset)),
+    })
+  }
 
   const cashPools: FundingPool[] = []
   if (input.useSpotUsdt) {
@@ -897,7 +1075,12 @@ export function planCash(
   let budgetLeft = input.budget ? d(input.budget) : null
   let unknownPriority = false
   for (const account of selected) {
-    const before = accountRisk(account, liveBook, input.path).row
+    const before = accountRisk(account, startBook, input.path).row
+    // A move with independent holdings can cross a gross collateral boundary
+    // at several different BTC prices. State that boundary directly.
+    const mixedSpot =
+      account.kind === 'spot' &&
+      account.holdings.some((h) => d(h.quantity).gt(0) && overrides[h.asset] !== undefined)
     const action =
       account.kind === 'spot'
         ? 'Repay spot margin debt'
@@ -910,12 +1093,12 @@ export function planCash(
       kind: account.kind,
       action,
       sources: [],
-      triggerAsset: before.triggerAsset,
+      triggerAsset: mixedSpot ? 'gross assets' : before.triggerAsset,
       targetPrice:
         account.kind === 'spot'
           ? target.toNumber()
           : number(price(targetBook, account.kind === 'loan' ? 'loan' : 'mark', account.asset)),
-      beforeLiquidation: before.liquidationPrice,
+      beforeLiquidation: mixedSpot ? before.assetBoundary : before.liquidationPrice,
       afterLiquidation: null,
       required: null,
       allocated: null,
@@ -929,7 +1112,7 @@ export function planCash(
       before.missing.forEach((m) => missing.add(m))
       if (budgetLeft !== null || pools.length) unknownPriority = true
     } else {
-      const required = D.max(cashNeed(account, liveBook), cashNeed(account, targetBook))
+      const required = D.max(...pathBooks.map((book) => cashNeed(account, book)))
       requiredTotal = requiredTotal.plus(required)
       row.required = required.toNumber()
       if (!unknownPriority) {
@@ -951,8 +1134,9 @@ export function planCash(
         row.residual = allocated.minus(applied).toNumber()
         row.uncovered = required.minus(allocated).toNumber()
         row.resultingBalance = d(funded.kind === 'perp' ? funded.margin : funded.debt).toNumber()
-        row.afterLiquidation = accountRisk(funded, liveBook, input.path).row.liquidationPrice
-        row.safe = cashNeed(funded, liveBook).isZero() && cashNeed(funded, targetBook).isZero()
+        const after = accountRisk(funded, startBook, input.path).row
+        row.afterLiquidation = mixedSpot ? after.assetBoundary : after.liquidationPrice
+        row.safe = pathBooks.every((book) => cashNeed(funded, book).isZero())
       }
     }
     actions.push(row)
@@ -970,6 +1154,7 @@ export function planCash(
     newDebt: missing.size ? null : sum(pledgePools.map(loanPrincipal)).toNumber(),
     actions,
     pledges,
+    references,
     stale,
     missing: [...missing],
   }

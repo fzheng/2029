@@ -252,15 +252,46 @@ export function saveAccountView(view: AccountView, revision: number) {
   })
 }
 
-function saveItem(collection: 'plans' | 'scenarios', item: SavedItem, revision: number) {
+export function saveScenario(item: SavedItem, revision: number) {
   return commit(revision, (current) => {
-    if (!validItem(item, collection)) throw new Error('Enter a name and valid inputs before saving.')
-    return { ...current, [collection]: replaceItem(current[collection], item) }
+    if (!validItem(item, 'scenarios')) throw new Error('Enter a name and valid inputs before saving.')
+    return { ...current, scenarios: replaceItem(current.scenarios, item) }
   })
 }
 
-export const savePlan = (item: SavedItem, revision: number) => saveItem('plans', item, revision)
-export const saveScenario = (item: SavedItem, revision: number) => saveItem('scenarios', item, revision)
+export function planNameKey(name: string) {
+  return name.normalize('NFKC').trim().toLowerCase()
+}
+
+export function savePlan(item: SavedItem, revision: number, options: { overwriteId?: string } = {}) {
+  return commit(revision, (current) => {
+    if (!validItem(item, 'plans')) throw new Error('Enter a name and valid inputs before saving.')
+    const name = item.name.trim()
+    const key = planNameKey(name)
+    const matches = current.plans.filter((plan) => planNameKey(plan.name) === key)
+    const { overwriteId } = options
+    if (overwriteId === undefined) {
+      if (matches.length) throw new Error('Confirm which saved plan to overwrite.')
+      return { ...current, plans: replaceItem(current.plans, { ...item, name }) }
+    }
+    // Older portfolios can contain several records with the same display name.
+    // Confirmation applies to exactly one target, even when renaming another record.
+    if (!matches.some((plan) => plan.id === overwriteId)) {
+      throw new Error('The selected plan no longer matches this name.')
+    }
+    const plans =
+      overwriteId === item.id ? current.plans : current.plans.filter((plan) => plan.id !== item.id)
+    return { ...current, plans: replaceItem(plans, { ...item, id: overwriteId, name }) }
+  })
+}
+
+export function deletePlan(id: string, revision: number) {
+  return commit(revision, (current) => {
+    const plans = current.plans.filter((plan) => plan.id !== id)
+    if (plans.length === current.plans.length) throw new Error('This saved plan no longer exists.')
+    return { ...current, plans }
+  })
+}
 
 export function clearPortfolio(revision: number) {
   return commit(revision, (current) => ({ ...newState(), generation: current.generation + 1 }))
@@ -382,6 +413,22 @@ function validPledges(value: unknown): boolean {
   return true
 }
 
+function validSnapshot(data: Record<string, unknown>) {
+  return (
+    (data.asOf === null || timestamp(data.asOf)) &&
+    (data.stale === undefined ||
+      (Array.isArray(data.stale) &&
+        data.stale.every(
+          (key) => typeof key === 'string' && /^(spot|loan|mark):[A-Z0-9]{1,30}$/.test(key),
+        ))) &&
+    validPrices(data.overrides, true) &&
+    object(data.book) &&
+    validPrices(data.book.spot, false) &&
+    validPrices(data.book.mark, false) &&
+    validPrices(data.book.loan, false)
+  )
+}
+
 function validItem(value: unknown, kind: 'plans' | 'scenarios'): value is SavedItem {
   if (!object(value) || !label(value.id) || !label(value.name) || !object(value.data)) return false
   const data = value.data
@@ -389,6 +436,12 @@ function validItem(value: unknown, kind: 'plans' | 'scenarios'): value is SavedI
   if (kind === 'plans') {
     return (
       decimal(data.target, true) &&
+      (data.snapshot === undefined ||
+        (object(data.snapshot) &&
+          validSnapshot(data.snapshot) &&
+          object(data.snapshot.overrides) &&
+          !('BTC' in data.snapshot.overrides) &&
+          !('USDT' in data.snapshot.overrides))) &&
       (data.accountId === undefined || typeof data.accountId === 'string') &&
       (data.useSpotUsdt === undefined || typeof data.useSpotUsdt === 'boolean') &&
       (data.pledges === undefined || validPledges(data.pledges)) &&
@@ -402,17 +455,7 @@ function validItem(value: unknown, kind: 'plans' | 'scenarios'): value is SavedI
     Array.isArray(data.symbols) &&
     data.symbols.every(asset) &&
     new Set(data.symbols).size === data.symbols.length &&
-    (data.asOf === null || timestamp(data.asOf)) &&
-    (data.stale === undefined ||
-      (Array.isArray(data.stale) &&
-        data.stale.every(
-          (key) => typeof key === 'string' && /^(spot|loan|mark):[A-Z0-9]{1,30}$/.test(key),
-        ))) &&
-    validPrices(data.overrides, true) &&
-    object(data.book) &&
-    validPrices(data.book.spot, false) &&
-    validPrices(data.book.mark, false) &&
-    validPrices(data.book.loan, false)
+    validSnapshot(data)
   )
 }
 function validList<T extends { id: string }>(

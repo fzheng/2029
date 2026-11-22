@@ -1,12 +1,23 @@
 import { useMemo, useState, type Dispatch, type SetStateAction } from 'react'
-import { ArrowDownToLine, Bookmark, Calculator, Coins, Crosshair, Layers3, Wallet } from 'lucide-react'
+import {
+  ArrowDownToLine, Bookmark, Calculator, Coins, Crosshair, Layers3, Plus, Trash2, Wallet,
+} from 'lucide-react'
 import { planCash, type CashAction } from './engine'
 import type { PlanInput, PriceBook } from './model'
-import { SaveName } from './Scenario'
+import { PlanDeleteDialog, PlanSaveDialog, planOptionLabel } from './PlanDialogs'
 import SpotFunding from './SpotFunding'
-import { accountTypeName, cash, describeQuote, triggerPrice, Tag } from './shared'
+import {
+  accountTypeName,
+  cash,
+  dateTime,
+  describeBtcMultipliers,
+  describeQuote,
+  pathName,
+  triggerPrice,
+  Tag,
+} from './shared'
 import { translate, useLanguage } from './i18n'
-import { savePlan, type PortfolioState } from './storage'
+import { planNameKey, type PortfolioState, type SavedItem } from './storage'
 
 const planMessages: Readonly<Record<string, string>> = {
   'The selected account is archived or missing. Choose an active account.':
@@ -42,7 +53,98 @@ function FundingStatus({ required, safe }: Pick<CashAction, 'required' | 'safe'>
   return <Tag tone="danger">{t('Funding shortfall', '方案资金不足')}</Tag>
 }
 
-export const defaultPlan: PlanInput = {
+function liquidationLabel(value: number | null, asset: string) {
+  if (value === null) return '—'
+  const unit = asset === 'gross assets' ? translate(' USDT gross assets', ' USDT（总资产）') : ' / ' + asset
+  return triggerPrice(value) + unit
+}
+
+function FundingAction({ action: a }: { action: CashAction }) {
+  const { t } = useLanguage()
+  return (
+    <article className="fund-action">
+      <div className="action-head">
+        <div>
+          <span className="small-text">{accountTypeName(a.kind)}</span>
+          <h3>{a.name}</h3>
+        </div>
+        <FundingStatus required={a.required} safe={a.safe} />
+      </div>
+      {a.required !== 0 && a.applied !== null && (
+        <p>
+          {t('Planned action', '计划操作')} · <b>{cash(a.applied)} USDT</b> ·{' '}
+          {t(a.action, actionsInChinese[a.kind])}
+        </p>
+      )}
+      {a.uncovered !== null && a.uncovered > 0 && (
+        <p className="fund-shortfall">
+          {t('Still needed', '仍缺')} <strong>{cash(a.uncovered)} USDT</strong>
+        </p>
+      )}
+      {a.sources.length > 0 && (
+        <div className="transfer-sources">
+          <h4>{t('Planned funding sources', '计划转入此账户的资金来源')}</h4>
+          <ul>
+            {a.sources.map((source) => (
+              <li key={JSON.stringify([source.kind, source.accountId, source.asset])}>
+                <span>
+                  {source.kind === 'external'
+                    ? t('External USDT', '外部 USDT')
+                    : source.kind === 'spotUsdt'
+                      ? source.name + t(' · free USDT', ' · 可用 USDT')
+                      : source.name +
+                        ' · ' +
+                        source.asset +
+                        t(' collateral loan', ' 质押借款')}
+                </span>
+                <b>{cash(source.amount)} USDT</b>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <dl className="action-values">
+        {[
+          [t('Required transfer', '当前需转入金额'), cash(a.required) + ' USDT'],
+          ...((a.residual ?? 0) > 0
+            ? [
+                [t('Planned transfer', '计划转入金额'), cash(a.allocated) + ' USDT'],
+                [
+                  t('Cash left at destination', '目标账户剩余资金'),
+                  cash(a.residual) + ' USDT',
+                ],
+              ]
+            : []),
+          [
+            a.kind === 'perp'
+              ? t('Resulting margin', '追加后保证金')
+              : t('Resulting debt', '还款后负债'),
+            cash(a.resultingBalance) + ' USDT',
+          ],
+          [
+            t('Before liquidation', '调整前强平价'),
+            liquidationLabel(a.beforeLiquidation, a.triggerAsset),
+          ],
+          [
+            t('After liquidation', '调整后强平价'),
+            a.afterLiquidation === null
+              ? a.safe
+                ? t('No trigger', '无强平触发价')
+                : '—'
+              : liquidationLabel(a.afterLiquidation, a.triggerAsset),
+          ],
+        ].map(([k, v]) => (
+          <div key={k}>
+            <dt>{k}</dt>
+            <dd>{v}</dd>
+          </div>
+        ))}
+      </dl>
+    </article>
+  )
+}
+
+const defaultPlan: PlanInput = {
   target: '',
   path: 'Base',
   budget: '',
@@ -50,26 +152,68 @@ export const defaultPlan: PlanInput = {
   accountId: '',
   useSpotUsdt: true,
 }
+
+export interface PlanDraft {
+  form: PlanInput
+  source: SavedItem | null
+}
+export function newPlanDraft(form: PlanInput = defaultPlan): PlanDraft {
+  return { form: { ...form }, source: null }
+}
+function savedPlanForm(plan: SavedItem): PlanInput {
+  // Plans saved before wallet funding was introduced use external cash only.
+  return { ...defaultPlan, useSpotUsdt: false, ...(plan.data as PlanInput) }
+}
+type PlanAction = 'save' | 'copy' | 'delete'
+
 export function Planner({
-  form,
-  setForm,
+  draft,
+  setDraft,
   book,
+  asOf,
   quoteStatus,
   state,
   onRecords,
   onAdd,
 }: {
-  form: PlanInput
-  setForm: Dispatch<SetStateAction<PlanInput>>
+  draft: PlanDraft
+  setDraft: Dispatch<SetStateAction<PlanDraft>>
   book: PriceBook
+  asOf: string | null
   quoteStatus: Record<string, 'fresh' | 'stale'>
   state: PortfolioState
   onRecords: (s: PortfolioState) => void
   onAdd: () => void
 }) {
   const { t } = useLanguage()
-  const [saveAt, setSaveAt] = useState<number | null>(null)
+  const { form, source } = draft
+  const [dialog, setDialog] = useState<{ action: PlanAction; revision: number } | null>(null)
   const [loadVersion, setLoadVersion] = useState(0)
+  const openDialog = (action: PlanAction) => setDialog({ action, revision: state.revision })
+  const stored = source && state.plans.find((p) => p.id === source.id)
+  const staleSource = useMemo(
+    () => !!source && (!stored || (source !== stored && JSON.stringify(stored) !== JSON.stringify(source))),
+    [source, stored],
+  )
+  const nameGroups = useMemo(() => {
+    const groups = new Map<string, SavedItem[]>()
+    for (const plan of state.plans) {
+      const key = planNameKey(plan.name)
+      const group = groups.get(key)
+      if (group) group.push(plan)
+      else groups.set(key, [plan])
+    }
+    return groups
+  }, [state.plans])
+  const setForm: Dispatch<SetStateAction<PlanInput>> = (update) =>
+    setDraft((current) => ({
+      ...current,
+      form: typeof update === 'function' ? update(current.form) : update,
+    }))
+  const loadDraft = (plan: SavedItem | null) => {
+    setDraft(plan ? { form: savedPlanForm(plan), source: plan } : newPlanDraft())
+    setLoadVersion((v) => v + 1)
+  }
   const accounts = useMemo(() => state.accounts.filter((a) => !a.archived), [state.accounts])
   const wallets = accounts.filter((a) => a.kind === 'cashSpot')
   const destinations = accounts.filter((a) => a.kind !== 'cashSpot')
@@ -88,36 +232,72 @@ export function Planner({
   )
   const change = (key: 'target' | 'path' | 'budget' | 'bufferPct' | 'accountId', value: string) =>
     setForm((current) => ({ ...current, [key]: value }))
+  const overrides = Object.entries(form.snapshot?.overrides ?? {})
+  const linkedAssets = describeBtcMultipliers(form.path, form.snapshot?.overrides)
+  const actions = result?.actions ?? []
+  const coveredActions = actions.filter((a) => a.required === 0)
+  const visibleActions = actions
+    .filter((a) => a.required !== 0)
+    .sort((a, b) => (b.required ?? 0) - (a.required ?? 0))
+  // A saved plan can be renamed even if its quotes are temporarily unavailable.
+  const canSave = (!!result && !result.missing.length) ||
+    (!!source && JSON.stringify(form) === JSON.stringify(savedPlanForm(source)))
   return (
     <div className="page-stack">
       <section className="panel">
-        <div className="panel-heading">
+        <div className="panel-heading plan-library-heading">
           <div className="panel-title">
             <Crosshair size={18} />
             <h2>{t('Survival target', '防强平目标')}</h2>
           </div>
-          {state.plans.length > 0 && (
-            <select
-              aria-label={t('Load saved plan', '载入已存方案')}
-              value=""
-              onChange={(e) => {
-                const p = state.plans.find((v) => v.id === e.target.value)
-                if (p) {
-                  // Plans saved before wallet funding was introduced use external cash only.
-                  setForm({ ...defaultPlan, useSpotUsdt: false, ...(p.data as PlanInput) })
-                  setLoadVersion((v) => v + 1)
-                }
-              }}
-            >
-              <option value="">{t('Load saved plan…', '载入已存方案…')}</option>
-              {state.plans.map((p) => (
-                <option value={p.id} key={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
+          {(state.plans.length > 0 || source) && (
+            <div className="plan-library-actions">
+              {state.plans.length > 0 && (
+                <label className="plan-choice">
+                  {stored && <span>{t('Editing', '正在编辑')}</span>}
+                  <select
+                    aria-label={t('Load saved plan', '载入已存方案')}
+                    value={stored?.id ?? ''}
+                    onChange={(e) => loadDraft(state.plans.find((p) => p.id === e.target.value) ?? null)}
+                  >
+                    <option value="" disabled>{t('Select a plan to edit…', '选择要编辑的方案…')}</option>
+                    {state.plans.map((p) => {
+                      const matches = nameGroups.get(planNameKey(p.name))!
+                      return (
+                        <option value={p.id} key={p.id}>
+                          {matches.length > 1 ? planOptionLabel(p, matches.indexOf(p)) : p.name}
+                        </option>
+                      )
+                    })}
+                  </select>
+                </label>
+              )}
+              <button className="btn compact" onClick={() => loadDraft(null)}>
+                <Plus size={14} />{t('New plan', '新建方案')}
+              </button>
+              {stored && (
+                <button className="btn compact" disabled={staleSource} onClick={() => openDialog('delete')}>
+                  <Trash2 size={14} />{t('Delete plan', '删除方案')}
+                </button>
+              )}
+            </div>
           )}
         </div>
+        {staleSource && (
+          <div className="notice plan-conflict" role="status">
+            {stored ? (
+              <>
+                {t('This plan changed in another view.', '此方案已在其他页面修改。')}
+                <button className="btn compact" onClick={() => loadDraft(stored)}>
+                  {t('Reload saved plan', '重新载入方案')}
+                </button>
+              </>
+            ) : t(
+              'This plan was deleted in another view. You can save your draft as a new plan.',
+              '此方案已在其他页面删除。你可以将当前内容另存为新方案。',
+            )}
+          </div>
+        )}
         <div className="plan-form">
           <label className="field">
             {t('BTC target price', 'BTC 目标价')}
@@ -133,6 +313,11 @@ export function Planner({
               />
               <span>USDT</span>
             </div>
+            {form.snapshot && form.target !== '' && Number(form.target) === 0 && (
+              <small>
+                {t('Enter a positive BTC price to calculate funding for this scenario.', '请输入大于零的 BTC 价格，以计算此情景所需的资金。')}
+              </small>
+            )}
           </label>
           <label className="field">
             {t('Apply to', '适用范围')}
@@ -207,18 +392,21 @@ export function Planner({
         <div className="panel-actions">
           <p className="small-text">
             {t(
-              'The buffer extends the BTC move beyond your target. Other prices follow the selected path.',
-              '安全缓冲会让 BTC 价格在目标价基础上沿原方向进一步变动，其他币种按所选路径变化。',
+              'The buffer extends the BTC move beyond your target. Other assets follow the selected path unless you copied a manual price target.',
+              '安全缓冲会让 BTC 在目标价基础上沿原方向进一步变动。其他资产按所选路径变化，手动指定的目标价保持固定。',
             )}
           </p>
-          <button
-            className="btn"
-            disabled={!result || !!result.missing.length}
-            onClick={() => setSaveAt(state.revision)}
-          >
-            <Bookmark size={14} />
-            {t('Save plan', '保存方案')}
-          </button>
+          <div className="plan-library-actions">
+            {source && (
+              <button className="btn" disabled={!canSave} onClick={() => openDialog('copy')}>
+                {t('Save as', '另存为')}
+              </button>
+            )}
+            <button className="btn primary" disabled={!canSave || staleSource} onClick={() => openDialog('save')}>
+              <Bookmark size={14} />
+              {source ? t('Save changes', '保存修改') : t('Save plan', '保存方案')}
+            </button>
+          </div>
         </div>
       </section>
       {hasSources && (
@@ -230,6 +418,72 @@ export function Planner({
           results={result?.pledges ?? []}
         />
       )}
+      <section className="panel plan-assumptions" aria-label={t('Plan assumptions', '方案假设')}>
+        <div className="panel-heading flex-wrap">
+          <div className="panel-title">
+            <h2>{t('Plan assumptions', '方案假设')}</h2>
+          </div>
+          {form.snapshot && (
+            <button
+              className="btn compact"
+              onClick={() => setForm((current) => ({ ...current, snapshot: undefined }))}
+            >
+              {overrides.length
+                ? t('Use live quotes and clear overrides', '使用实时行情并清除手动价格')
+                : t('Use live quotes', '使用实时行情')}
+            </button>
+          )}
+        </div>
+        <div className="plan-assumption-body">
+          <p>
+            <strong>
+              {form.snapshot ? t('Frozen scenario quotes', '已锁定的情景报价') : t('Live quotes', '实时行情')}
+            </strong>
+            {' · '}{dateTime(form.snapshot ? form.snapshot.asOf : asOf)}
+            {' · '}{t('Price path', '价格路径')} <b>{pathName(form.path)}</b>
+          </p>
+          {linkedAssets && (
+            <p>{t('BTC move multipliers', 'BTC 涨跌幅模拟倍数')} · {linkedAssets}</p>
+          )}
+          {!!result?.stale.length && (
+            <p className="notice">
+              {t('Estimated using last-known prices', '本方案使用上次获取的价格估算')} ·{' '}
+              {result.stale.map(describeQuote).join(t(', ', '、'))}
+            </p>
+          )}
+          {form.target !== '' && Number.isFinite(Number(form.target)) && (
+            <p>
+              {t('BTC target', 'BTC 目标价')} <b>{triggerPrice(Number(form.target))} USDT</b>
+              {Number(form.bufferPct) > 0 && (
+                <>
+                  {' · '}{t('Buffer', '缓冲')} <b>{form.bufferPct}%</b>
+                  {' · '}{t('Buffered target', '缓冲后目标价')}{' '}
+                  <b>{triggerPrice(result?.bufferedBtcTarget)} USDT</b>
+                </>
+              )}
+            </p>
+          )}
+          {overrides.length > 0 && (
+            <p>
+              {t('Manual price targets', '手动目标价')}{' · '}
+              {overrides.map(([asset, value]) => asset + ' ' + cash(Number(value)) + ' USDT').join(' · ')}
+            </p>
+          )}
+          {result && result.references.length > 0 && (
+            <>
+              <p className="small-text">{t('Reference → stress price (USDT)', '参考价 → 压力测试价（USDT）')}</p>
+              <ul className="plan-reference-prices">
+                {result.references.map(({ asset, basis, start, end }) => (
+                  <li key={basis + ':' + asset}>
+                    <span>{describeQuote(asset + ' ' + (basis === 'loan' ? 'loan reference' : basis))}</span>
+                    <b>{triggerPrice(start)} → {triggerPrice(end)}</b>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
+      </section>
       {result && (
         <div className="metrics plan-metrics">
           {[
@@ -281,12 +535,6 @@ export function Planner({
             ))}
           </dl>
         )}
-        {!!result?.stale.length && (
-          <p className="notice">
-            {t('Estimated using last-known prices', '本方案使用上次获取的价格估算')} ·{' '}
-            {result.stale.map(describeQuote).join(t(', ', '、'))}
-          </p>
-        )}
         {!!result?.missing.length && (
           <p className="notice">
             {t('Plan incomplete', '方案尚不完整')} · {result.missing.map(planIssue).join(t(', ', '、'))}
@@ -327,111 +575,57 @@ export function Planner({
           </div>
         ) : (
           <>
-            <p className="panel-description">
-              {t(
-                'Cash is allocated to spot margin first, then individual loans, then isolated perpetuals.',
-                '资金优先用于现货全仓杠杆账户，其次逐笔偿还质押借币，最后补充逐仓永续仓位的保证金。',
-              )}
-              {result.budgetRemaining !== null && (
-                <>
-                  {' '}
-                  {t(
+            {(visibleActions.length > 0 || result.budgetRemaining !== null) && (
+              <p className="panel-description">
+                {visibleActions.length > 0 && t(
+                  'Sorted by required transfer, largest first. Funds go to spot margin first, then loans, then isolated perpetuals.',
+                  '按所需补资金额从高到低排列。资金优先分配给现货杠杆账户，其次是质押借币，最后是逐仓永续合约。',
+                )}
+                {result.budgetRemaining !== null && (
+                  <> {t(
                     `Remaining external budget · ${cash(result.budgetRemaining)} USDT.`,
                     `剩余外部预算为 ${cash(result.budgetRemaining)} USDT。`,
-                  )}
-                </>
-              )}
-            </p>
-            {result.actions.map((a) => (
-              <article className="fund-action" key={a.accountId}>
-                <div className="action-head">
-                  <div>
-                    <span className="small-text">{accountTypeName(a.kind)}</span>
-                    <h3>{a.name}</h3>
-                  </div>
-                  <FundingStatus required={a.required} safe={a.safe} />
-                </div>
-                {a.required !== 0 && a.applied !== null && (
-                  <p>
-                    {t('Planned action', '计划操作')} · <b>{cash(a.applied)} USDT</b> ·{' '}
-                    {t(a.action, actionsInChinese[a.kind])}
-                  </p>
+                  )}</>
                 )}
-                {a.uncovered !== null && a.uncovered > 0 && (
-                  <p className="fund-shortfall">
-                    {t('Still needed', '仍缺')} <strong>{cash(a.uncovered)} USDT</strong>
-                  </p>
-                )}
-                {a.sources.length > 0 && (
-                  <div className="transfer-sources">
-                    <h4>{t('Planned funding sources', '计划转入此账户的资金来源')}</h4>
-                    <ul>
-                      {a.sources.map((source) => (
-                        <li key={JSON.stringify([source.kind, source.accountId, source.asset])}>
-                          <span>
-                            {source.kind === 'external'
-                              ? t('External USDT', '外部 USDT')
-                              : source.kind === 'spotUsdt'
-                                ? source.name + t(' · free USDT', ' · 可用 USDT')
-                                : source.name +
-                                  ' · ' +
-                                  source.asset +
-                                  t(' collateral loan', ' 质押借款')}
-                          </span>
-                          <b>{cash(source.amount)} USDT</b>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-                <dl className="action-values">
-                  {[
-                    [t('Required transfer', '当前需转入金额'), cash(a.required) + ' USDT'],
-                    ...((a.residual ?? 0) > 0
-                      ? [
-                          [t('Planned transfer', '计划转入金额'), cash(a.allocated) + ' USDT'],
-                          [
-                            t('Cash left at destination', '目标账户剩余资金'),
-                            cash(a.residual) + ' USDT',
-                          ],
-                        ]
-                      : []),
-                    [
-                      a.kind === 'perp'
-                        ? t('Resulting margin', '追加后保证金')
-                        : t('Resulting debt', '还款后负债'),
-                      cash(a.resultingBalance) + ' USDT',
-                    ],
-                    [
-                      t('Before liquidation', '调整前强平价'),
-                      triggerPrice(a.beforeLiquidation) + ' / ' + a.triggerAsset,
-                    ],
-                    [
-                      t('After liquidation', '调整后强平价'),
-                      a.afterLiquidation === null
-                        ? a.safe
-                          ? t('No trigger', '无强平触发价')
-                          : '—'
-                        : triggerPrice(a.afterLiquidation) + ' / ' + a.triggerAsset,
-                    ],
-                  ].map(([k, v]) => (
-                    <div key={k}>
-                      <dt>{k}</dt>
-                      <dd>{v}</dd>
-                    </div>
-                  ))}
-                </dl>
-              </article>
+              </p>
+            )}
+            {visibleActions.map((action) => (
+              <FundingAction key={action.accountId} action={action} />
             ))}
+            {coveredActions.length > 0 && (
+              <details className="covered-accounts" key={loadVersion}>
+                <summary>
+                  {t(`No funding needed (${coveredActions.length})`, `无需补资（${coveredActions.length}）`)}
+                </summary>
+                {coveredActions.map((action) => (
+                  <FundingAction key={action.accountId} action={action} />
+                ))}
+              </details>
+            )}
           </>
         )}
       </section>
-      {saveAt !== null && (
-        <SaveName
-          title={t('Save target plan', '保存目标方案')}
-          onClose={() => setSaveAt(null)}
-          onSave={async (name) => {
-            onRecords(await savePlan({ id: crypto.randomUUID(), name, data: form }, saveAt))
+      {(dialog?.action === 'save' || dialog?.action === 'copy') && (
+        <PlanSaveDialog
+          plans={state.plans}
+          source={dialog.action === 'save' ? source : null}
+          data={form}
+          revision={dialog.revision}
+          onClose={() => setDialog(null)}
+          onSaved={(next, id) => {
+            onRecords(next)
+            loadDraft(next.plans.find((p) => p.id === id)!)
+          }}
+        />
+      )}
+      {dialog?.action === 'delete' && source && (
+        <PlanDeleteDialog
+          plan={source}
+          revision={dialog.revision}
+          onClose={() => setDialog(null)}
+          onDeleted={(next) => {
+            onRecords(next)
+            loadDraft(null)
           }}
         />
       )}

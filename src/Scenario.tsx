@@ -12,12 +12,13 @@ import {
   Save,
   SlidersHorizontal,
 } from 'lucide-react'
-import { buildScenario, evaluate, referencePrice } from './engine'
-import type { Basis, Path, PriceBook, Prices } from './model'
+import { buildScenario, evaluate, referencePrice, type RiskEvent } from './engine'
+import { btcMoveMultipliers, type Basis, type Path, type PriceBook, type Prices } from './model'
 import {
   accountPriceInputs,
   Coin,
   dateTime,
+  describeBtcMultipliers,
   describeEvent,
   describeQuote,
   Dialog,
@@ -201,15 +202,48 @@ function Comparison({
   projected: ReturnType<typeof evaluate>
 }) {
   const { t } = useLanguage()
-  const rows = (r: typeof live) => [
-    [t('Net equity', '净权益'), dollars(r.equity) + ' USDT'],
-    [t('Effective leverage', '实际杠杆'), r.leverage == null ? '—' : dollars(r.leverage) + '×'],
-    [t('Total debt', '总负债'), dollars(r.debt) + ' USDT'],
-    ...[r.firstWarning, r.firstLiquidation].map((v, i) => [
-      i ? t('First liquidation', '最先触发的强平') : t('First warning', '最先触发的预警'),
-      describeEvent(v),
-    ]),
+  const leverage = (r: typeof live) => (r.leverage == null ? '—' : dollars(r.leverage) + '×')
+  const metrics = [
+    [t('Net equity', '净权益'), dollars(live.equity) + ' USDT', dollars(projected.equity) + ' USDT'],
+    [t('Effective leverage (excl. spot wallets)', '实际杠杆（不含普通现货）'), leverage(live), leverage(projected)],
+    [t('Total debt', '总负债'), dollars(live.debt) + ' USDT', dollars(projected.debt) + ' USDT'],
   ]
+  const thresholds = [
+    {
+      name: t('Warning', '预警'),
+      live: live.firstWarning,
+      reached: projected.firstWarning,
+      next: projected.nextWarning,
+    },
+    {
+      name: t('Liquidation', '强平'),
+      live: live.firstLiquidation,
+      reached: projected.firstLiquidation,
+      next: projected.nextLiquidation,
+    },
+  ]
+  const { direction } = projected
+  const continuation = !direction
+    ? t('Next on this path', '沿此路径的下一次触发')
+    : direction.falling
+      ? t(`Next if ${direction.asset} keeps falling`, `若 ${direction.asset} 继续下跌`)
+      : t(`Next if ${direction.asset} keeps rising`, `若 ${direction.asset} 继续上涨`)
+  const none = projected.missing.length ? t('None among priced accounts', '已估值账户中无') : t('None', '无')
+  const eventText = (event: RiskEvent | null) => {
+    if (!event) return none
+    const parts = [event.name]
+    const point = event.pathPoint
+    if (point) parts.push(point.asset + ' ' + price(point.price))
+    const separateTrigger = event.basis || !point || event.asset !== point.asset || event.price !== point.price
+    if (event.price !== null && separateTrigger) {
+      let asset = event.asset === 'gross assets' ? t('gross assets', '总资产') : event.asset
+      if (event.basis === 'loan') asset += t(' loan reference', ' 借款参考价')
+      if (event.basis === 'mark') asset += t(' mark', ' 标记价')
+      parts.push(asset + ' ' + price(event.price))
+    }
+    if (event.atSnapshot) parts.push(t('Threshold reached at snapshot', '快照时已触及'))
+    return parts.join(' · ')
+  }
   return (
     <section className="panel">
       <div className="panel-heading">
@@ -228,14 +262,39 @@ function Comparison({
           <i className="status-dot amber" />
           {t('Scenario', '情景')}
         </strong>
-        {rows(live).map(([k, v], i) => (
+        {metrics.map(([k, actual, stressed], i) => (
           <div className="comparison-row" key={k}>
             <span>{k}</span>
-            <b>{v}</b>
-            <b>{rows(projected)[i][1]}</b>
+            <b>{actual}</b>
+            <div>
+              <b>{stressed}</b>
+              {i === 0 && (
+                <small className="risk-caption">{t('Zero recovery after liquidation', '强平后按零回收估算')}</small>
+              )}
+            </div>
+          </div>
+        ))}
+        {thresholds.map(({ name, live: current, reached, next }) => (
+          <div className="comparison-row" key={name}>
+            <span>{name}</span>
+            <div>
+              <small className="risk-caption">{t('Nearest threshold', '最近的阈值')}</small>
+              <b>{describeEvent(current)}</b>
+            </div>
+            <div className="scenario-event">
+              <small className="risk-caption">{t('First triggered during this move', '本次变动中最先触及')}</small>
+              <b>{eventText(reached)}</b>
+              <small className="risk-caption">{continuation}</small>
+              <b>{direction ? eventText(next) : t('Requires a move in one asset', '需指定单一资产的变动方向')}</b>
+            </div>
           </div>
         ))}
       </div>
+      {projected.missing.length > 0 && (
+        <p className="panel-description">
+          {t('Scenario rankings include only accounts with complete prices.', '情景触发顺序仅考虑报价完整的账户。')}
+        </p>
+      )}
       {projected.accounts.some((row) => row.status === 'Liquidation') && (
         <p className="panel-description">
           {t(
@@ -265,23 +324,28 @@ export function Scenario({
   const { t } = useLanguage()
   const [pick, setPick] = useState(false),
     [saveAt, setSaveAt] = useState<number | null>(null)
-  const scenarioBook = useMemo(() => {
-    // Keep the full frozen market available for symbol search while valuing only
-    // assets displayed here or referenced by an active account.
-    const symbols = new Set([
-      ...scenario.symbols,
-      ...records.accounts
-        .filter((a) => !a.archived)
-        .flatMap((a) => accountPriceInputs(a).map(({ asset }) => asset)),
-    ])
+  const { scenarioBook, staleReferences } = useMemo(() => {
+    // A saved scenario can hide BTC from the editor while using it to drive the move.
+    const anchors = new Set(['BTC', ...scenario.symbols, ...Object.keys(scenario.overrides)])
+    const inputs = records.accounts.filter((a) => !a.archived).flatMap(accountPriceInputs)
+    const symbols = new Set([...anchors, ...inputs.map(({ asset }) => asset)])
+    const usedBases = new Set(inputs.map(({ basis, asset }) => basis + ':' + asset))
     const book: PriceBook = { spot: {}, loan: {}, mark: {} }
-    for (const basis of ['spot', 'mark', 'loan'] as Basis[]) {
+    const bases: Basis[] = ['spot', 'mark', 'loan']
+    for (const basis of bases) {
       for (const symbol of symbols) {
         const value = scenario.book[basis][symbol]
         if (value !== undefined) book[basis][symbol] = value
       }
     }
-    return buildScenario(book, scenario.path, scenario.overrides)
+    for (const asset of anchors) {
+      const basis = bases.find((b) => book[b][asset] !== undefined)
+      if (basis) usedBases.add(basis + ':' + asset)
+    }
+    return {
+      scenarioBook: buildScenario(book, scenario.path, scenario.overrides),
+      staleReferences: scenario.stale?.filter((key) => usedBases.has(key)) ?? [],
+    }
   }, [scenario, records.accounts])
   const live = useMemo(
     () => evaluate(records.accounts, liveBook, scenario.path),
@@ -291,24 +355,12 @@ export function Scenario({
     () => evaluate(records.accounts, scenarioBook, scenario.path),
     [records.accounts, scenarioBook, scenario.path],
   )
+  const hasLiquidation = projected.accounts.some((row) => row.status === 'Liquidation')
   const setPrice = (asset: string, value: string) =>
     update({ ...scenario, overrides: { ...scenario.overrides, [asset]: new Decimal(value).toFixed() } })
   const available = Object.keys({ ...scenario.book.spot, ...scenario.book.mark, ...scenario.book.loan })
-  const usedBases = new Set(
-    records.accounts
-      .filter((a) => !a.archived)
-      .flatMap((a) => accountPriceInputs(a).map(({ basis, asset }) => basis + ':' + asset)),
-  )
-  for (const asset of scenario.symbols) {
-    const anchor = (['spot', 'mark', 'loan'] as Basis[]).find(
-      (basis) => scenario.book[basis][asset] !== undefined,
-    )
-    if (anchor) usedBases.add(anchor + ':' + asset)
-  }
-  const staleReferences = scenario.stale?.filter((key) => usedBases.has(key)) ?? []
   const quoteList = (names: string[]) => names.map(describeQuote).join(t(', ', '、'))
-  const multipliers =
-    scenario.path === 'Base' ? 'ETH 1.5× · SOL 1.7× · BNB 1.0×' : 'ETH 2.5× · SOL 3.0× · BNB 1.5×'
+  const multipliers = describeBtcMultipliers(scenario.path)
   return (
     <div className="page-stack">
       <div className="context-bar">
@@ -318,7 +370,7 @@ export function Scenario({
         </span>
         <button className="btn compact" onClick={onPlan}>
           <Calculator size={14} />
-          {t('Open cash planner', '打开资金规划')}
+          {t('Plan using this scenario', '按此情景规划资金')}
         </button>
       </div>
       {staleReferences.length > 0 && (
@@ -355,8 +407,8 @@ export function Scenario({
                 '可分别调整各资产相对于已锁定参考价的涨跌幅。',
               )
             : t(
-                `${multipliers} of the BTC move. Editing an altcoin overrides its link.`,
-                `各资产按 BTC 涨跌幅的以下倍数变动：${multipliers}。手动改价后，该资产将独立于 BTC。`,
+                `BTC move multipliers (${multipliers}). Other assets keep their frozen prices. A manual price overrides the link.`,
+                `BTC 涨跌幅的模拟倍数为 ${multipliers}。其他币种保持快照价格。手动设价后，该币种按手动价格计算。`,
               )}
         </p>
         <div className="scenario-grid-labels">
@@ -395,20 +447,20 @@ export function Scenario({
                         value={change}
                         onChange={(e) => fromPct(e.target.value)}
                       />
-                      {asset !== 'BTC' &&
-                        scenario.path !== 'Independent' &&
-                        scenario.overrides[asset] !== undefined && (
-                          <button
-                            className="text-button"
-                            onClick={() => {
-                              const overrides = { ...scenario.overrides }
-                              delete overrides[asset]
-                              update({ ...scenario, overrides })
-                            }}
-                          >
-                            {t('Restore BTC link', '恢复与 BTC 联动')}
-                          </button>
-                        )}
+                      {asset !== 'BTC' && scenario.overrides[asset] !== undefined && (
+                        <button
+                          className="text-button"
+                          onClick={() => {
+                            const overrides = { ...scenario.overrides }
+                            delete overrides[asset]
+                            update({ ...scenario, overrides })
+                          }}
+                        >
+                          {btcMoveMultipliers[scenario.path][asset]
+                            ? t('Restore BTC link', '恢复与 BTC 联动')
+                            : t('Restore reference price', '恢复快照价格')}
+                        </button>
+                      )}
                     </div>
                     <EditableNumber
                       label={t(`${asset} scenario price`, `${asset} 情景价格`)}
@@ -467,6 +519,14 @@ export function Scenario({
           <div className="panel-heading">
             <h2>{t('Account outcomes', '各账户模拟结果')}</h2>
           </div>
+          {hasLiquidation && (
+            <p className="panel-description">
+              {t(
+                'Equity at trigger is measured before fees and execution. Actual settlement is unknown.',
+                '触及强平时的净权益按执行成交前、未扣费的估值计算。实际结算金额未知。',
+              )}
+            </p>
+          )}
           <div className="table-scroll">
             <table>
               <thead>
@@ -475,6 +535,7 @@ export function Scenario({
                   <th>{t('Live equity', '实时净权益')}</th>
                   <th>{t('Scenario equity', '情景净权益')}</th>
                   <th>{t('Scenario status', '情景状态')}</th>
+                  {hasLiquidation && <th>{t('Equity at trigger (USDT)', '触及强平时的净权益（USDT）')}</th>}
                 </tr>
               </thead>
               <tbody>
@@ -496,6 +557,7 @@ export function Scenario({
                             : riskStatus(r.status)}
                       </Tag>
                     </td>
+                    {hasLiquidation && <td>{dollars(r.equityAtTrigger)}</td>}
                   </tr>
                 ))}
               </tbody>

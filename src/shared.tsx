@@ -2,15 +2,17 @@ import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Check, Search, X } from 'lucide-react'
 import type { RiskEvent, RiskStatus } from './engine'
-import type { Account, Basis, Path } from './model'
+import { btcMoveMultipliers, type Account, type Basis, type Path, type Prices } from './model'
 import { currentLocale, translate, useLanguage } from './i18n'
+import { popularSymbols as majors } from './market'
 
-export const majors = ['BTC', 'ETH', 'SOL', 'BNB']
+export { majors }
 const assetNames: Record<string, string> = {
   BTC: 'Bitcoin',
   ETH: 'Ethereum',
   SOL: 'Solana',
   BNB: 'BNB',
+  HYPE: 'Hyperliquid',
   XRP: 'XRP',
   DOGE: 'Dogecoin',
   ADA: 'Cardano',
@@ -106,6 +108,11 @@ export function accountPriceInputs(account: Account): { basis: Basis; asset: str
 }
 export const pathName = (path: Path) =>
   translate(path, { Independent: '独立', Base: '基础', Severe: '严峻' }[path])
+export const describeBtcMultipliers = (path: Path, overrides?: Prices) =>
+  Object.entries(btcMoveMultipliers[path])
+    .filter(([asset]) => overrides?.[asset] === undefined)
+    .map(([asset, weight]) => asset + ' ' + weight + '×')
+    .join(' · ')
 export const riskStatus = (status: RiskStatus) =>
   translate(status, { Safe: '安全', Warning: '预警', Liquidation: '强平', Unpriced: '缺少报价' }[status])
 

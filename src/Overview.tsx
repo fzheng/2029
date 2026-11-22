@@ -26,7 +26,7 @@ import { MarketChart, intervalLabel } from './MarketChart'
 import { useLanguage } from './i18n'
 import { chartIntervals, type ChartInterval, type MarketSnapshot } from './market'
 import type { Account, Path } from './model'
-import { type evaluate, walletHoldings } from './engine'
+import { type AccountRisk, type evaluate, walletHoldings } from './engine'
 import { manualAccountOrder, moveVisibleAccount, sortAccountRows } from './accountOrder'
 import { useAccountReorder } from './AccountReorder'
 import { saveAccountView, type AccountSort, type PortfolioState } from './storage'
@@ -94,7 +94,7 @@ export function Metrics({ risk }: { risk: Portfolio }) {
           {t('Effective leverage', '实际杠杆')}
         </div>
         <div className="metric-value">{risk.leverage == null ? '—' : dollars(risk.leverage) + '×'}</div>
-        <p>{t('Gross exposure / net equity', '总敞口 / 净权益')}</p>
+        <p>{t('Spot margin, perpetuals and loans', '仅计现货杠杆、永续合约和质押借币')}</p>
       </article>
       <article className="metric">
         <div className="metric-label">
@@ -114,7 +114,7 @@ export function Metrics({ risk }: { risk: Portfolio }) {
         <div className="metric-value">{event ? dollars(event.distancePct) + '%' : '—'}</div>
         <p>
           {event
-            ? t('Distance to trigger · ', '距强平触发点 · ') + event.name
+            ? t('Distance to nearest trigger · ', '距最近强平触发点 · ') + event.name
             : !hasMarginOrLoans
               ? t('No liquidation exposure', '暂无强平敞口')
               : risk.missing.length
@@ -291,6 +291,80 @@ export function Markets({
     </section>
   )
 }
+function AccountFacts({ row }: { row: AccountRisk }) {
+  const { t } = useLanguage()
+  const account = row.account
+  const facts: [string, string][] = []
+  const percent = (ratio: number | null) =>
+    ratio == null ? '—' : ratio === Infinity ? '∞' : dollars(ratio * 100) + '%'
+  if (account.kind === 'spot' || account.kind === 'loan') {
+    facts.push([t('Debt', '负债'), dollars(row.debt) + ' USDT'])
+  }
+  if (account.kind === 'spot') {
+    if (row.assetBoundary != null) {
+      facts.push(
+        [t('Risk rate', '风险率'), percent(row.risk)],
+        [t('Gross-asset liquidation boundary', '总资产强平线'), dollars(row.assetBoundary) + ' USDT'],
+      )
+    }
+  }
+  if (account.kind === 'loan' || account.kind === 'perp') {
+    const nativePrice = (value: number | null) =>
+      value == null ? '—' : price(value) + ' USDT / ' + account.asset
+    if (account.kind === 'loan') {
+      facts.push(
+        [t('Pledged collateral', '质押数量'), account.collateral + ' ' + account.asset],
+        [t('Collateral index price', '抵押币指数价'), nativePrice(row.referencePrice)],
+        [t('LTV', '质押率（LTV）'), percent(row.ltv)],
+        [
+          t('Warning / liquidation LTV', '预警 / 强平质押率'),
+          percent(Number(account.warningLtv)) + ' / ' + percent(Number(account.liquidationLtv)),
+        ],
+      )
+    } else {
+      const flat = new Decimal(account.size).isZero()
+      const side = flat
+        ? t('Flat', '已平仓')
+        : t(account.side, account.side === 'long' ? '多头' : '空头')
+      facts.push(
+        [t('Position', '仓位'), account.size + ' ' + account.asset + ' · ' + side],
+        [t('Allocated margin', '逐仓保证金'), account.margin + ' USDT'],
+      )
+      if (!flat) {
+        facts.push(
+          [t('Entry price', '开仓均价'), nativePrice(Number(account.entry))],
+          [t('Mark price', '标记价格'), nativePrice(row.referencePrice)],
+          [
+            t('Maintenance + close fee', '维持保证金与平仓手续费'),
+            row.maintenance == null ? '—' : dollars(row.maintenance) + ' USDT',
+          ],
+        )
+      }
+    }
+    if (row.liquidationPrice != null) {
+      const label = account.kind === 'loan'
+        ? t('Index price at liquidation', '强平时的指数价')
+        : t('Mark price at liquidation', '强平时的标记价')
+      facts.push([label, nativePrice(row.liquidationPrice)])
+    }
+  }
+  if (row.warningPrice != null)
+    facts.push([t('Warning trigger', '预警触发价'), price(row.warningPrice) + ' USDT / ' + row.triggerAsset])
+  if (row.distancePct != null)
+    facts.push([t('Distance to liquidation', '距强平的价格变动'), dollars(row.distancePct) + '%'])
+  facts.push([t('Last balance edit', '上次余额修改时间'), dateTime(account.updatedAt)])
+  return (
+    <dl>
+      {facts.map(([label, value]) => (
+        <div key={label}>
+          <dt>{label}</dt>
+          <dd>{value}</dd>
+        </div>
+      ))}
+    </dl>
+  )
+}
+
 export function Accounts({
   risk,
   market,
@@ -450,129 +524,6 @@ export function Accounts({
               const flat = a.kind === 'perp' && new Decimal(a.size).isZero()
               const holdings =
                 a.kind === 'cashSpot' ? walletHoldings(a) : a.kind === 'spot' ? a.holdings : []
-              const details: [string, string][] =
-                a.kind === 'cashSpot'
-                  ? [
-                      [
-                        t('Available USDT', '可用 USDT'),
-                        (holdings.find((h) => h.asset === 'USDT')?.quantity ?? '0') + ' USDT',
-                      ],
-                      [t('Net equity', '净权益'), dollars(r.equity) + ' USDT'],
-                      [t('Debt', '负债'), dollars(r.debt) + ' USDT'],
-                      [t('Price basis', '定价依据'), t('Bitget spot last', 'Bitget 现货最新成交价')],
-                      [t('Last balance edit', '上次余额修改时间'), dateTime(a.updatedAt)],
-                    ]
-                  : [
-                      [
-                        t('Price basis', '定价依据'),
-                        a.kind === 'spot'
-                          ? t('Bitget spot last', 'Bitget 现货最新成交价')
-                          : a.kind === 'loan'
-                            ? t('Bitget coin/USDT index (estimate)', 'Bitget 币种/USDT 指数价（估算）')
-                            : t('Bitget perpetual mark', 'Bitget 永续合约标记价格'),
-                      ],
-                      [
-                        t('Valuation price', '估值价格'),
-                        a.kind === 'spot'
-                          ? t('Per holding at spot last', '各币种按现货最新成交价估值')
-                          : price(r.referencePrice) + ' USDT / ' + a.asset,
-                      ],
-                      [
-                        t('Holdings', '持仓'),
-                        a.kind === 'spot'
-                          ? a.holdings.map((h) => h.quantity + ' ' + h.asset).join(t(', ', '、')) ||
-                            t('None', '无')
-                          : a.kind === 'loan'
-                            ? t(
-                                a.collateral + ' ' + a.asset + ' pledged',
-                                '已质押 ' + a.collateral + ' ' + a.asset,
-                              )
-                            : a.size +
-                              ' ' +
-                              a.asset +
-                              ' · ' +
-                              (flat
-                                ? t('Flat', '已平仓')
-                                : t(a.side, a.side === 'long' ? '多头' : '空头')),
-                      ],
-                      [
-                        t('Effective leverage', '实际杠杆'),
-                        r.leverage == null ? '—' : dollars(r.leverage) + '×',
-                      ],
-                      [t('Debt', '负债'), dollars(r.debt) + ' USDT'],
-                      [t('Net equity', '净权益'), dollars(r.equity) + ' USDT'],
-                      ...((a.kind === 'spot'
-                        ? [
-                            [
-                              t('Risk rate', '风险率'),
-                              r.risk == null ? '—' : dollars(r.risk * 100) + '%',
-                            ],
-                            [t('Personal alert', '个人预警阈值'), t('65% risk rate', '风险率达到 65%')],
-                            [
-                              t('Gross-asset liquidation boundary', '总资产强平线'),
-                              dollars(r.assetBoundary) + ' USDT',
-                            ],
-                            [
-                              t('BTC trigger path', 'BTC 触发价的联动路径'),
-                              path === 'Base'
-                                ? pathName(path) + ' · ETH 1.5×, SOL 1.7×, BNB 1.0×'
-                                : pathName(path),
-                            ],
-                            [
-                              t('Gross-asset alert boundary', '总资产预警线'),
-                              dollars(r.warningBoundary) + ' USDT',
-                            ],
-                          ]
-                        : a.kind === 'loan'
-                          ? [
-                              [
-                                t('LTV', '质押率（LTV）'),
-                                r.ltv == null ? '—' : dollars(r.ltv * 100) + '%',
-                              ],
-                              [
-                                t('Warning / liquidation LTV', '预警 / 强平质押率'),
-                                dollars(Number(a.warningLtv) * 100) +
-                                  '% / ' +
-                                  dollars(Number(a.liquidationLtv) * 100) +
-                                  '%',
-                              ],
-                            ]
-                          : [
-                              [
-                                t('Entry price', '开仓均价'),
-                                flat ? '—' : price(Number(a.entry)) + ' USDT',
-                              ],
-                              [t('Allocated margin', '逐仓保证金'), a.margin + ' USDT'],
-                              [
-                                t('Maintenance + close fee', '维持保证金与平仓手续费'),
-                                dollars(r.maintenance) + ' USDT',
-                              ],
-                              [
-                                t('Dashboard warning', '看板预警条件'),
-                                t(
-                                  '80% of equity used for maintenance and closing fee',
-                                  '维持保证金与平仓手续费合计达到净权益的 80%',
-                                ),
-                              ],
-                            ]) as [string, string][]),
-                      [
-                        t('Warning trigger', '预警触发价'),
-                        r.warningPrice == null
-                          ? '—'
-                          : price(r.warningPrice) + ' USDT / ' + r.triggerAsset,
-                      ],
-                      [
-                        t('Est. liquidation', '预计强平价'),
-                        r.liquidationPrice == null
-                          ? '—'
-                          : price(r.liquidationPrice) + ' USDT / ' + r.triggerAsset,
-                      ],
-                      [
-                        t('Distance to liquidation', '距强平的价格变动'),
-                        r.distancePct == null ? '—' : dollars(r.distancePct) + '%',
-                      ],
-                      [t('Last balance edit', '上次余额修改时间'), dateTime(a.updatedAt)],
-                    ]
               return (
                 <div className="record" key={a.id} {...reorder.rowProps(a.id)}>
                   {reorder.grip(a.id)}
@@ -596,9 +547,25 @@ export function Accounts({
                       <b>{a.name}</b>
                       <small>{accountTypeName(a.kind)}</small>
                     </span>
-                    <span className="record-amount">
-                      <b>{dollars(r.equity)}</b>
-                      <small>{t('USDT equity', '净权益（USDT）')}</small>
+                    <span className="record-metrics">
+                      <span className="record-metric">
+                        <small>{t('Effective leverage', '实际杠杆')}</small>
+                        <b>{r.leverage == null ? '—' : dollars(r.leverage) + '×'}</b>
+                      </span>
+                      <span
+                        className="record-metric"
+                        title={t(
+                          'Estimated BTC price in USDT on the ' + pathName(path) + ' path.',
+                          '按' + pathName(path) + '联动路径估算，单位为 USDT/BTC。',
+                        )}
+                      >
+                        <small>{t('BTC liquidation price', 'BTC 强平价')}</small>
+                        <b>{price(r.btcLiquidationPrice)}</b>
+                      </span>
+                      <span className="record-metric">
+                        <small>{t('Net equity (USDT)', '净权益（USDT）')}</small>
+                        <b>{dollars(r.equity)}</b>
+                      </span>
                     </span>
                     <Tag tone={flat ? 'neutral' : r.status === 'Safe' ? 'green' : 'warm'}>
                       {flat
@@ -607,7 +574,7 @@ export function Accounts({
                           ? t('Unleveraged', '无杠杆')
                           : riskStatus(r.status)}
                     </Tag>
-                    <ChevronDown className={isOpen ? 'turned' : ''} size={15} />
+                    <ChevronDown className={isOpen ? 'record-chevron turned' : 'record-chevron'} size={15} />
                   </button>
                   {isOpen && (
                     <div className="record-details">
@@ -652,14 +619,7 @@ export function Accounts({
                           </table>
                         </div>
                       )}
-                      <dl>
-                        {details.map(([k, v]) => (
-                          <div key={k}>
-                            <dt>{k}</dt>
-                            <dd>{v}</dd>
-                          </div>
-                        ))}
-                      </dl>
+                      <AccountFacts row={r} />
                       {r.missing.length > 0 && (
                         <p>
                           {t('Missing prices', '缺少报价')} ·{' '}
@@ -698,8 +658,8 @@ export function RiskSummary({ risk }: { risk: Portfolio }) {
   return (
     <div className="risk-summary">
       {[
-        [t('First warning', '最先触发的预警'), risk.firstWarning],
-        [t('First liquidation', '最先触发的强平'), risk.firstLiquidation],
+        [t('Nearest warning threshold', '最近的预警阈值'), risk.firstWarning],
+        [t('Nearest liquidation threshold', '最近的强平阈值'), risk.firstLiquidation],
       ].map(([label, item]) => {
         const event = item as Portfolio['firstWarning']
         return (

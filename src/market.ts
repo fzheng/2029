@@ -8,7 +8,7 @@ const CANDLE_CACHE = '2029.bitget-candles.v1'
 const MAX_AGE = 2 * 60_000
 const intervalMillis = { '1H': 3_600_000, '4H': 4 * 3_600_000, '1D': 86_400_000, '1W': 7 * 86_400_000 }
 const bases: Basis[] = ['spot', 'mark', 'loan']
-export const popularSymbols = ['BTC', 'ETH', 'SOL', 'BNB']
+export const popularSymbols = ['BTC', 'ETH', 'SOL', 'BNB', 'HYPE']
 export const chartIntervals = ['1H', '4H', '1D', '1W'] as const
 export type ChartInterval = (typeof chartIntervals)[number]
 

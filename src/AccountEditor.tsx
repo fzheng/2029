@@ -3,12 +3,13 @@ import type { FormEvent, ReactNode } from 'react'
 import Decimal from 'decimal.js'
 import { Archive, ArrowDownUp, CircleDollarSign, Layers3, Plus, Trash2, Wallet, X } from 'lucide-react'
 import type { Account, PerpAccount } from './model'
-import { fetchContractTerms } from './market'
+import { isDecimalAmount } from './model'
+import { fetchContractTerms, popularSymbols } from './market'
 import { saveAccount } from './storage'
 import type { PortfolioState } from './storage'
 import { fieldLabel, formError, type FieldName, type FormIssue } from './formMessages'
 import { useLanguage } from './i18n'
-import { accountTypeName } from './shared'
+import { accountTypeName, assetName } from './shared'
 import './forms.css'
 
 export function PortfolioDialog({
@@ -130,20 +131,26 @@ const accountTypes = [
 ] as const
 
 const toPercent = (value: string) => new Decimal(value).mul(100).toFixed()
-const wholeDecimal = /^(?:\d+(?:\.\d*)?|\.\d+)$/
-
 function amount(value: string, field: FieldName, positive = false) {
   value = value.trim()
-  if (
-    !wholeDecimal.test(value) ||
-    !Number.isFinite(Number(value)) ||
-    (positive && new Decimal(value).lte(0))
-  ) {
+  if (!isDecimalAmount(value, positive)) {
     throw new Error(
       field + (positive ? ' must be greater than zero.' : ' must be a non-negative decimal.'),
     )
   }
   return value
+}
+
+function parseDebt(value: string) {
+  const magnitude = value.trim().replace(/^[-−]/, '')
+  if (magnitude.includes(',') && !/^\d{1,3}(?:,\d{3})+(?:\.\d*)?$/.test(magnitude)) return ''
+  const digits = magnitude.replaceAll(',', '')
+  return isDecimalAmount(digits) ? digits : ''
+}
+
+function displayDebt(value: string, locale: string) {
+  const [whole, fraction = ''] = value.split('.')
+  return BigInt(whole || '0').toLocaleString(locale) + '.' + fraction.padEnd(2, '0')
 }
 function symbol(value: string) {
   const normalized = value.trim().toUpperCase()
@@ -174,6 +181,7 @@ export default function AccountEditor({ account, revision, onClose, onSaved }: E
       : [{ asset: '', quantity: '' }],
   )
   const [debt, setDebt] = useState(account && 'debt' in account ? account.debt : '')
+  const parsedDebt = parseDebt(debt)
   const [asset, setAsset] = useState(account && 'asset' in account ? account.asset : '')
   const [increment, setIncrement] = useState(
     (account && 'increment' in account ? account.increment : undefined) ?? '0.01',
@@ -241,6 +249,10 @@ export default function AccountEditor({ account, revision, onClose, onSaved }: E
         ...(kind === 'cashSpot' ? {} : { increment: amount(increment, 'USDT action increment', true) }),
       }
       if (!common.name) throw new Error('Give this account a name.')
+      const recordedDebt = kind === 'spot' && !debt.trim() ? '0' : parsedDebt
+      if ((kind === 'spot' || kind === 'loan') && !recordedDebt) {
+        throw new Error('Enter a debt amount such as 1500 or -1,500.00.')
+      }
       let record: Account
       if (kind === 'spot' || kind === 'cashSpot') {
         const entries = holdings
@@ -252,7 +264,7 @@ export default function AccountEditor({ account, revision, onClose, onSaved }: E
         record =
           kind === 'cashSpot'
             ? { ...common, kind, holdings: entries }
-            : { ...common, kind, holdings: entries, debt: amount(debt || '0', 'USDT debt') }
+            : { ...common, kind, holdings: entries, debt: recordedDebt }
       } else if (kind === 'loan') {
         const warningLtv = ratio(warning, 'Warning LTV', true)
         const liquidationLtv = ratio(liquidation, 'Liquidation LTV', true)
@@ -264,7 +276,7 @@ export default function AccountEditor({ account, revision, onClose, onSaved }: E
           kind,
           asset: symbol(asset),
           collateral: amount(collateral, 'Pledged quantity', true),
-          debt: amount(debt, 'Loan debt'),
+          debt: recordedDebt,
           warningLtv,
           liquidationLtv,
         }
@@ -306,6 +318,28 @@ export default function AccountEditor({ account, revision, onClose, onSaved }: E
     }
   }
 
+  const formattedDebt = parsedDebt && displayDebt(parsedDebt, locale)
+  const debtField = (
+    <>
+      <Field
+        label={kind === 'loan' ? 'Outstanding loan debt' : 'Outstanding debt'}
+        unit="USDT"
+        numeric
+        required={kind === 'loan'}
+        value={debt}
+        onChange={(value) => {
+          setDebt(value)
+          setError(null)
+        }}
+      />
+      <p className="pf-hint" role="status">
+        {formattedDebt
+          ? t('Recorded as ' + formattedDebt + ' USDT owed', '将记为欠款 ' + formattedDebt + ' USDT')
+          : t('Include accrued interest in the debt balance.', '债务余额应包含应计利息。')}
+      </p>
+    </>
+  )
+
   return (
     <PortfolioDialog
       title={account ? t('Edit account', '编辑账户') : t('Add account', '添加账户')}
@@ -340,8 +374,8 @@ export default function AccountEditor({ account, revision, onClose, onSaved }: E
           {account && <p className="pf-type-label">{accountTypeName(kind)} · Bitget</p>}
           <Field label="Account name" value={name} onChange={setName} required autoFocus />
           <datalist id="pf-asset-list">
-            {['BTC', 'ETH', 'SOL', 'BNB', 'USDT'].map((a) => (
-              <option key={a} value={a} />
+            {[...popularSymbols, 'USDT'].map((asset) => (
+              <option key={asset} value={asset} label={assetName(asset)} />
             ))}
           </datalist>
           {kind === 'spot' || kind === 'cashSpot' ? (
@@ -400,12 +434,7 @@ export default function AccountEditor({ account, revision, onClose, onSaved }: E
                   )}
                 </p>
               ) : (
-                <>
-                  <Field label="Outstanding debt" unit="USDT" numeric value={debt} onChange={setDebt} />
-                  <p className="pf-hint">
-                    {t('Include accrued interest in the debt balance.', '债务余额应包含应计利息。')}
-                  </p>
-                </>
+                debtField
               )}
             </>
           ) : (
@@ -441,17 +470,7 @@ export default function AccountEditor({ account, revision, onClose, onSaved }: E
               </div>
               {kind === 'loan' ? (
                 <>
-                  <Field
-                    label="Outstanding loan debt"
-                    value={debt}
-                    unit="USDT"
-                    numeric
-                    onChange={setDebt}
-                    required
-                  />
-                  <p className="pf-hint">
-                    {t('Include accrued interest for this loan order.', '请计入此笔借款的应计利息。')}
-                  </p>
+                  {debtField}
                   <div className="pf-grid">
                     <Field
                       label="Warning LTV"

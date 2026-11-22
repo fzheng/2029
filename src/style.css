@@ -557,6 +557,10 @@ nav button:hover,
   background: #3b331e;
   color: #f1c74f;
 }
+.coin-hype {
+  background: #183b35;
+  color: #9aefd8;
+}
 .intervals {
   display: inline-flex;
   gap: 2px;
@@ -958,9 +962,16 @@ footer b {
   max-width: 100%;
 }
 @media (max-width: 660px) {
+  .page-stack:has(> .accounts-panel) {
+    grid-template-columns: minmax(0, 1fr);
+  }
   .account-order-select {
     flex: 1 0 100%;
     order: 1;
+    min-width: 0;
+  }
+  .account-order-select > span {
+    flex-shrink: 0;
   }
   .account-order-select select {
     flex: 1;
@@ -971,7 +982,9 @@ footer b {
   border-top: 1px solid var(--line);
 }
 .record-main {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, 1.65fr) minmax(84px, 0.3fr) 15px;
+  grid-template-areas: 'symbol name metrics status chevron';
   gap: 13px;
   align-items: center;
   width: 100%;
@@ -984,6 +997,7 @@ footer b {
   background: #1e2228;
 }
 .record-symbol {
+  grid-area: symbol;
   display: grid;
   place-items: center;
   border-radius: 8px;
@@ -993,7 +1007,7 @@ footer b {
   color: #b6bbc4;
 }
 .record-name {
-  flex: 1;
+  grid-area: name;
   min-width: 0;
   overflow-wrap: anywhere;
 }
@@ -1006,9 +1020,40 @@ footer b {
   color: #9ba2ae;
   margin-top: 4px;
 }
-.record-amount {
+.record-metrics {
+  grid-area: metrics;
+  display: grid;
+  grid-template-columns: minmax(0, 0.88fr) minmax(0, 1fr) minmax(0, 1.12fr);
+  gap: 12px;
+  min-width: 0;
   text-align: right;
-  margin-right: 14px;
+}
+.record-metric {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.record-metric small {
+  margin: 0;
+  line-height: 1.25;
+}
+.record-metric b {
+  font: 500 14px/1.35 var(--mono);
+}
+.record-main > .tag {
+  grid-area: status;
+  justify-self: end;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: center;
+  line-height: 1.2;
+}
+.record-chevron {
+  grid-area: chevron;
 }
 .turned {
   transform: rotate(180deg);
@@ -1238,6 +1283,15 @@ select {
   font: 13px var(--mono);
   font-weight: 500;
 }
+.risk-caption {
+  display: block;
+  color: #aeb4bd;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.scenario-event b + .risk-caption {
+  margin-top: 8px;
+}
 .comparison-row:first-of-type b {
   font-size: 18px;
 }
@@ -1309,6 +1363,38 @@ th {
   color: #aab1bb;
   font-weight: 500;
 }
+.plan-library-heading,
+.plan-library-actions,
+.plan-conflict {
+  flex-wrap: wrap;
+}
+.plan-library-actions,
+.plan-conflict {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.plan-library-actions {
+  max-width: 100%;
+  min-width: 0;
+}
+.plan-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.plan-choice > span {
+  flex: none;
+}
+.plan-library-actions select {
+  min-width: 0;
+  max-width: min(100%, 32ch);
+  text-overflow: ellipsis;
+}
 .plan-form {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -1318,9 +1404,50 @@ th {
 .plan-metrics .metric {
   min-height: 105px;
 }
+.plan-assumption-body {
+  padding: 15px 20px;
+  display: grid;
+  gap: 9px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.plan-assumption-body p,
+.plan-reference-prices {
+  margin: 0;
+}
+.plan-reference-prices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  list-style: none;
+  padding: 0;
+}
+.plan-reference-prices li {
+  display: grid;
+  gap: 2px;
+}
+.plan-reference-prices span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.plan-reference-prices b {
+  font: 500 12px var(--mono);
+}
 .fund-action {
   padding: 16px 20px;
   border-top: 1px solid var(--line);
+}
+.covered-accounts {
+  border-top: 1px solid var(--line);
+}
+.covered-accounts > summary {
+  padding: 14px 20px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 550;
+}
+.covered-accounts > summary:focus-visible {
+  outline-offset: -3px;
 }
 .action-head h3 {
   margin-top: 3px;
@@ -1384,11 +1511,18 @@ th {
   .account-empty {
     padding: 22px 19px;
   }
-  .record-amount {
-    margin-right: 5px;
-  }
 }
 @media (max-width: 800px) {
+  .record-main {
+    grid-template-columns: auto minmax(0, 1fr) fit-content(35%) 15px;
+    grid-template-areas:
+      'symbol name status chevron'
+      'metrics metrics metrics metrics';
+    row-gap: 12px;
+  }
+  .record-metrics {
+    text-align: left;
+  }
   .header-inner {
     height: 60px;
   }
@@ -1655,7 +1789,10 @@ th {
   }
   .record-main {
     padding: 13px 10px;
-    gap: 7px;
+    column-gap: 7px;
+  }
+  .record-metrics {
+    gap: 6px;
   }
   .record-main b {
     font-size: 13px;
@@ -1666,6 +1803,7 @@ th {
   .filters {
     gap: 2px;
     padding: 9px;
+    flex-wrap: wrap;
   }
   .filters button {
     padding: 5px 7px;
@@ -1764,8 +1902,11 @@ th {
   .record-symbol {
     display: none;
   }
-  .record-amount {
-    margin: 0;
+  .record-main {
+    grid-template-columns: minmax(0, 1fr) fit-content(35%) 15px;
+    grid-template-areas:
+      'name status chevron'
+      'metrics metrics metrics';
   }
   .plan-form {
     grid-template-columns: 1fr;

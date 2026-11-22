@@ -286,8 +286,8 @@ export default function SpotFunding({
         {inputs.length > 0 && (
           <p className="small-text">
             {t(
-              'A used loan locks the entered quantity and creates new debt. Capacity uses the Bitget index at today’s price and the buffered target. Estimates exclude future interest.',
-              '方案动用某笔借款时，将锁定填写的质押数量，并形成新负债。额度按当前与缓冲目标价下的 Bitget 指数价核算，未计入后续利息。',
+              'A used loan locks the entered quantity and creates new debt. Capacity uses the starting Bitget index and the index at the buffered target. Estimates exclude future interest.',
+              '方案动用某笔借款时，将锁定填写的质押数量，并形成新负债。额度按起始与缓冲目标价下的 Bitget 指数价核算，未计入后续利息。',
             )}
           </p>
         )}

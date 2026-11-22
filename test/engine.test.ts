@@ -69,6 +69,34 @@ test('specified example: 2 × 1,500 gross, 1,500 debt, 2× leverage, 10% risk, 1
   assert.equal(evaluate([spot()], book('850')).accounts[0].status, 'Warning')
 })
 
+test('portfolio leverage uses combined margin, loan and perpetual exposure and equity', () => {
+  const wallet: CashSpotAccount = {
+    ...common, kind: 'cashSpot', id: 'cash', name: 'Reserve',
+    holdings: [{ asset: 'ETH', quantity: '10' }, { asset: 'USDT', quantity: '1000' }],
+  }
+  const riskAccounts = [spot(), loan(), perp()]
+  const quotes = { ...book('1000'), spot: { BTC: '1000', ETH: '900' } }
+  const accounts = [...riskAccounts, wallet]
+  const portfolio = evaluate(accounts, quotes)
+  assert.deepEqual([portfolio.equity, portfolio.exposure, portfolio.debt], [10900, 15000, 2300])
+  close(portfolio.leverage, 5000 / 900)
+  close(evaluate(riskAccounts, quotes).leverage, 5000 / 900)
+
+  const unpricedWallet = evaluate(accounts, book('1000'))
+  assert.equal(unpricedWallet.equity, null)
+  assert.deepEqual(unpricedWallet.missing, ['ETH spot'])
+  close(unpricedWallet.leverage, 5000 / 900)
+  assert.equal(evaluate(accounts, { ...quotes, mark: {} }).leverage, null)
+
+  for (const debt of ['2000', '2200']) {
+    const insolvent = evaluate([spot({ debt }), wallet], quotes)
+    assert.ok(insolvent.equity! > 0)
+    assert.equal(insolvent.leverage, null)
+  }
+  // A negative margin balance still reduces the combined equity of the eligible accounts.
+  close(evaluate([spot({ debt: '2200' }), loan(), perp(), wallet], quotes).leverage, 5000 / 200)
+})
+
 test('loan values use order thresholds, loan index and collateral just once', () => {
   const v = evaluate([loan({ collateral: '2', warningLtv: '.8', liquidationLtv: '.9', debt: '1440' })], {
     spot: { BTC: '2000' },
@@ -80,6 +108,7 @@ test('loan values use order thresholds, loan index and collateral just once', ()
     [r.gross, r.equity, r.ltv, r.leverage, r.warningPrice, r.liquidationPrice, r.status],
     [1800, 360, 0.8, 5, 900, 800, 'Warning'],
   )
+  close(r.btcLiquidationPrice, 2000 * 800 / 900)
 })
 
 test('long and short isolated mark-to-market and fee-aware estimated liquidation', () => {
@@ -91,6 +120,7 @@ test('long and short isolated mark-to-market and fee-aware estimated liquidation
     assert.equal(r.equity, side === 'long' ? 300 : 100)
     close(r.leverage, 2100 / r.equity!)
     close(r.liquidationPrice, side === 'long' ? 1800 / 1.98 : 2200 / 2.02)
+    close(r.btcLiquidationPrice, 800 * r.liquidationPrice! / 1050)
     assert.equal(r.status, 'Safe')
     const adverse = side === 'long' ? '900' : '1100'
     assert.equal(evaluate([account], book(adverse)).accounts[0].status, 'Liquidation')
@@ -126,25 +156,55 @@ test('no price substitutions or partial totals when a held basis is missing', ()
 
 test('linked moves and alt overrides use one frozen snapshot, preserve each basis spread and floor at zero', () => {
   const snapshot = {
-    spot: { BTC: '1000', ETH: '100', SOL: '50', BNB: '20', ATOM: '7' },
-    mark: { BTC: '1010' },
-    loan: { BTC: '980' },
+    spot: { BTC: '1000', ETH: '100', SOL: '50', BNB: '20', HYPE: '100', ATOM: '7', USDT: '1' },
+    mark: { BTC: '1010', HYPE: '110' },
+    loan: { BTC: '980', HYPE: '90' },
   }
   const frozen = JSON.stringify(snapshot)
   const base = buildScenario(snapshot, 'Base', { BTC: '800' })
-  assert.deepEqual(base.spot, { BTC: '800', ETH: '70', SOL: '33', BNB: '16', ATOM: '7' })
+  assert.deepEqual(base.spot, { BTC: '800', ETH: '70', SOL: '33', BNB: '16', HYPE: '66', ATOM: '7', USDT: '1' })
   assert.equal(base.mark.BTC, '808')
   assert.equal(base.loan.BTC, '784')
+  assert.deepEqual([base.mark.HYPE, base.loan.HYPE], ['72.6', '59.4'])
+  const upside = buildScenario(snapshot, 'Severe', { BTC: '1100' })
+  assert.deepEqual([upside.spot.HYPE, upside.mark.HYPE, upside.loan.HYPE], ['130', '143', '117'])
+  const pinned = buildScenario(snapshot, 'Severe', { BTC: '1100', HYPE: '80', USDT: '0' })
+  assert.deepEqual([pinned.spot.HYPE, pinned.mark.HYPE, pinned.loan.HYPE, pinned.spot.USDT], ['80', '88', '72', '1'])
   const severe = buildScenario(snapshot, 'Severe', { BTC: '500', BNB: '10' })
-  assert.deepEqual(severe.spot, { BTC: '500', ETH: '0', SOL: '0', BNB: '10', ATOM: '7' })
+  assert.deepEqual(severe.spot, { BTC: '500', ETH: '0', SOL: '0', BNB: '10', HYPE: '0', ATOM: '7', USDT: '1' })
   assert.deepEqual(buildScenario(snapshot, 'Independent', { BTC: '300', ATOM: '2' }).spot, {
     BTC: '300',
     ETH: '100',
     SOL: '50',
     BNB: '20',
+    HYPE: '100',
     ATOM: '2',
+    USDT: '1',
   })
   assert.equal(JSON.stringify(snapshot), frozen)
+})
+
+test('HYPE uses its own price basis for liquidation and per-account funding along the same BTC path', () => {
+  const snapshot = { spot: { BTC: '1000', HYPE: '100' }, mark: { HYPE: '110' }, loan: { HYPE: '90' } }
+  const accounts = [
+    loan({ asset: 'HYPE', debt: '60', liquidationLtv: '.9' }),
+    perp({ asset: 'HYPE', size: '1', entry: '110', margin: '30' }),
+    spot({ holdings: [{ asset: 'HYPE', quantity: '1' }], debt: '70' }),
+  ]
+  const mild = evaluate(accounts, buildScenario(snapshot, 'Severe', { BTC: '990' }), 'Severe')
+  assert.equal(mild.firstLiquidation, null)
+  assert.equal(mild.nextLiquidation?.id, 's')
+  close(mild.nextLiquidation!.pathPoint!.price, 1000 * (1 - .23 / 3))
+  const stressed = evaluate(accounts, buildScenario(snapshot, 'Severe', { BTC: '900' }), 'Severe')
+  assert.equal(stressed.firstLiquidation?.id, mild.nextLiquidation?.id)
+  close(stressed.firstLiquidation!.pathPoint!.price, mild.nextLiquidation!.pathPoint!.price)
+  assert.deepEqual(stressed.accounts.map((a) => a.status), ['Liquidation', 'Liquidation', 'Liquidation'])
+  const plan = planCash(accounts, snapshot, { target: '900', path: 'Severe' })
+  assert.deepEqual(plan.actions.map((a) => [a.accountId, a.targetPrice, a.required, a.safe]), [
+    ['s', 900, 6.37, true],
+    ['l', 63, 3.31, true],
+    ['p', 77, 3.78, true],
+  ])
 })
 
 test('spot BTC trigger follows named alt path incl. a floored altcoin and a pinned override', () => {
@@ -160,6 +220,60 @@ test('spot BTC trigger follows named alt path incl. a floored altcoin and a pinn
   close(evaluate([acct], base, 'Independent').accounts[0].liquidationPrice, 50)
   const scenario = buildScenario(base, 'Severe', { BTC: '800', ETH: '40' })
   close(evaluate([acct], scenario, 'Severe').accounts[0].liquidationPrice, 350)
+  close(evaluate([acct], scenario).accounts[0].btcLiquidationPrice, 350)
+})
+
+test('account BTC liquidation prices invert linked loan and perpetual moves from the frozen basis', () => {
+  for (const [asset, base, severe] of [
+    ['ETH', 1.5, 2.5],
+    ['SOL', 1.7, 3],
+    ['BNB', 1, 1.5],
+    ['HYPE', 1.7, 3],
+  ] as const) {
+    const quotes = {
+      spot: { BTC: '1000', [asset]: '100' },
+      mark: { [asset]: '110' },
+      loan: { [asset]: '90' },
+    }
+    const positions = [
+      loan({ asset, debt: '64.8', liquidationLtv: '.9' }), // Liquidation at 72, down 20% on the index.
+      perp({ asset, size: '1', entry: '110', margin: '22.88' }), // At 88, down 20% on the mark.
+      perp({ asset, id: 'short', size: '1', side: 'short', entry: '110', margin: '23.32' }), // At 132, up 20%.
+    ]
+    for (const [path, weight] of [['Base', base], ['Severe', severe]] as const) {
+      for (const book of [quotes, buildScenario(quotes, path, { BTC: '995' })]) {
+        const [loanRisk, longRisk, shortRisk] = evaluate(positions, book, path).accounts
+        close(loanRisk.btcLiquidationPrice, 1000 * (1 - 0.2 / weight))
+        close(longRisk.btcLiquidationPrice, 1000 * (1 - 0.2 / weight))
+        close(shortRisk.btcLiquidationPrice, 1000 * (1 + 0.2 / weight))
+      }
+    }
+    const pinned = buildScenario(quotes, 'Severe', { BTC: '995', [asset]: '99' })
+    for (const [book, path] of [[pinned, 'Severe'], [quotes, 'Independent']] as const) {
+      assert.ok(evaluate(positions, book, path).accounts.every((r) => r.btcLiquidationPrice === null))
+    }
+  }
+})
+
+test('BTC liquidation prices include a reachable zero mark and omit undefined boundaries', () => {
+  const floor = perp({ asset: 'HYPE', entry: '100', size: '1', margin: '100' })
+  const quotes = { spot: { BTC: '1000' }, mark: { HYPE: '100' }, loan: { HYPE: '95', ATOM: '10' } }
+  close(evaluate([floor], quotes).accounts[0].btcLiquidationPrice, 1000 * (1 - 1 / 1.7))
+  close(evaluate([{ ...floor, asset: 'BTC' }], book('1000')).accounts[0].btcLiquidationPrice, 0)
+
+  const cash: CashSpotAccount = { ...common, id: 'c', name: 'Cash', kind: 'cashSpot', holdings: [] }
+  const accounts = [
+    cash,
+    loan({ asset: 'ATOM' }),
+    loan({ asset: 'USDT' }),
+    loan({ asset: 'HYPE', debt: '0' }),
+    spot({ debt: '0' }),
+    perp({ asset: 'HYPE', size: '0' }),
+    loan({ asset: 'ETH' }),
+    perp({ asset: 'ETH' }),
+  ]
+  assert.ok(evaluate(accounts, quotes).accounts.every((r) => r.btcLiquidationPrice === null))
+  assert.equal(evaluate([floor], { ...quotes, spot: {} }).accounts[0].btcLiquidationPrice, null)
 })
 
 test('target touch adds an executable cent for all three actions; lower budget prioritizes spot, then loan, then perp', () => {
@@ -256,6 +370,69 @@ test('scenario reports the first warning and liquidation actually crossed, indep
   assert.deepEqual(result.accounts.map((row) => row.equity), [0, 0])
 })
 
+test('Severe ranks upcoming and reached loan thresholds in BTC coordinates and retains equity at first touch', () => {
+  const snapshot = { spot: { BTC: '60000', SOL: '100' }, loan: { BTC: '60000', SOL: '100' }, mark: {} }
+  const positions = [
+    loan({ id: 'btc', debt: '49140', warningLtv: '.90' }),
+    loan({ id: 'sol', asset: 'SOL', debt: '72.80' }),
+  ]
+  const project = (BTC: string) => evaluate(positions, buildScenario(snapshot, 'Severe', { BTC }), 'Severe')
+  const mild = project('59400')
+  assert.deepEqual(mild.accounts.map((r) => r.status), ['Safe', 'Safe'])
+  assert.equal(mild.firstWarning, null)
+  assert.equal(mild.firstLiquidation, null)
+  assert.equal(mild.nextWarning?.id, 'sol')
+  assert.equal(mild.nextLiquidation?.id, 'sol')
+  assert.deepEqual(mild.nextLiquidation?.pathPoint, { asset: 'BTC', price: 56000 })
+  assert.equal(mild.nextLiquidation?.price, 80)
+  assert.equal(mild.accounts[1].equityAtTrigger, null)
+  const hit = project('56000')
+  assert.equal(hit.firstWarning?.id, 'sol')
+  assert.equal(hit.firstLiquidation?.id, 'sol')
+  assert.deepEqual(hit.firstLiquidation?.pathPoint, mild.nextLiquidation?.pathPoint)
+  assert.equal(hit.nextLiquidation?.id, 'btc')
+  assert.equal(hit.nextLiquidation?.pathPoint?.price, 54000)
+  for (const result of [hit, project('50000')]) {
+    assert.equal(result.accounts[1].equity, 0)
+    assert.equal(result.accounts[1].equityAtTrigger, 7.2)
+  }
+  assert.equal(project('50000').nextLiquidation, null)
+  assert.equal(project('60000').direction, null)
+  const startingBelow = evaluate(positions, buildScenario({ ...snapshot, loan: { SOL: '70' } }, 'Severe', {}))
+  assert.equal(startingBelow.firstLiquidation?.atSnapshot, true)
+  assert.equal(startingBelow.accounts[1].equityAtTrigger, null)
+})
+
+test('upside continuation respects mark basis, ignores long positions, and needs a single direction', () => {
+  const snapshot = { spot: { BTC: '1000', SOL: '100' }, mark: { SOL: '102' }, loan: {} }
+  const short = perp({ asset: 'SOL', side: 'short', size: '1', entry: '100', margin: '110' })
+  const accounts = [short, perp({ asset: 'SOL', id: 'long', entry: '102' })]
+  const mild = evaluate(accounts, buildScenario(snapshot, 'Severe', { BTC: '1010' }), 'Severe')
+  assert.equal(mild.nextLiquidation?.id, short.id)
+  const nativeTrigger = 210 / 1.01
+  close(mild.nextLiquidation!.price, nativeTrigger)
+  close(mild.nextLiquidation!.pathPoint!.price, 1000 * (1 + (nativeTrigger / 102 - 1) / 3))
+  const pinned = evaluate(accounts, buildScenario(snapshot, 'Severe', { BTC: '1010', SOL: '100' }), 'Severe')
+  assert.equal(pinned.nextLiquidation, null)
+  const independent = evaluate(accounts, buildScenario(snapshot, 'Independent', { SOL: '103' }), 'Independent')
+  close(independent.nextLiquidation!.pathPoint!.price, nativeTrigger / 1.02)
+  const mixed = evaluate(accounts, buildScenario(snapshot, 'Severe', { BTC: '1010', SOL: '103' }), 'Severe')
+  assert.deepEqual([mixed.direction, mixed.nextWarning, mixed.nextLiquidation], [null, null, null])
+})
+
+test('the zero-maintenance floor is included when predicting and valuing an isolated liquidation', () => {
+  const long = perp({ size: '1', entry: '100', margin: '50', maintenanceRate: '.20', maintenanceOffset: '15', takerFee: '0' })
+  assert.equal(evaluate([long], book('100')).accounts[0].liquidationPrice, 50)
+  const mild = evaluate([long], buildScenario(book('100'), 'Base', { BTC: '51' }))
+  assert.equal(mild.firstLiquidation, null)
+  assert.equal(mild.nextLiquidation?.price, 50)
+  for (const target of ['50', '0']) {
+    const result = evaluate([long], buildScenario(book('100'), 'Base', { BTC: target }))
+    assert.equal(result.firstLiquidation?.price, 50)
+    assert.equal(result.accounts[0].equityAtTrigger, 0)
+  }
+})
+
 test('a simulated cross account, loan or isolated position loses its remaining equity exactly at liquidation', () => {
   const snapshot = book('1000')
   const cases = [
@@ -315,7 +492,7 @@ test('liquidation is isolated to the affected account before portfolio equity an
     [0, 318, 250],
   )
   assert.deepEqual([projected.equity, projected.exposure], [568, 750])
-  close(projected.leverage, 750 / 568)
+  close(projected.leverage, 500 / 318)
   assert.equal(projected.firstLiquidation?.id, positions[0].id)
   assert.equal(evaluate(positions, snapshot).debt, 1682)
   assert.ok(planCash(positions, snapshot, { target: '500', path: 'Base' }).actions[0].required! > 0)
@@ -350,6 +527,7 @@ test('a position liquidated midway through a single scenario stays closed even i
   const projection = evaluate([account], target, 'Severe')
   assert.equal(projection.firstLiquidation?.id, account.id)
   assert.equal(projection.firstLiquidation?.price, 99)
+  close(projection.accounts[0].equityAtTrigger, 9)
   assert.deepEqual(
     [projection.accounts[0].status, projection.equity, projection.exposure],
     ['Liquidation', 0, 0],

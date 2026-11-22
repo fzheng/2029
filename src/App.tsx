@@ -10,23 +10,24 @@ import {
   LayoutDashboard,
   Languages,
   Layers3,
+  Plus,
   Radio,
   RefreshCw,
   Settings2,
   ShieldCheck,
 } from 'lucide-react'
-import { evaluate } from './engine'
+import { evaluate, planFromScenario } from './engine'
 import { previewOrderFills } from './orderFills'
 import PendingOrders from './PendingOrders'
 import { useLanguage, type Language } from './i18n'
-import type { Account, PlanInput } from './model'
+import type { Account } from './model'
 import { cachedQuotes, fetchQuotes } from './market'
 import { loadPortfolio, subscribePortfolio, type PortfolioState } from './storage'
 import AccountEditor from './AccountEditor'
 import Settings from './settings'
 import { Accounts, Markets, Metrics, RiskSummary } from './Overview'
 import { LoadScenario, Scenario, type ScenarioState } from './Scenario'
-import { defaultPlan, Planner } from './Planner'
+import { newPlanDraft, Planner, type PlanDraft } from './Planner'
 import { accountPriceInputs, Brand, dateTime, describeQuote, majors, Tag } from './shared'
 
 const empty: PortfolioState = {
@@ -53,7 +54,8 @@ export default function App() {
     [dbError, setDbError] = useState<'open' | 'refresh' | null>(null)
   const [editor, setEditor] = useState<{ account?: Account; revision: number } | null>(null),
     [settings, setSettings] = useState(false)
-  const [plan, setPlan] = useState<PlanInput>({ ...defaultPlan })
+  const [plan, setPlan] = useState<PlanDraft>(newPlanDraft)
+  const [scenarioPlan, setScenarioPlan] = useState<PlanDraft | null>(null)
   const [selectedOrderIds, setSelectedOrderIds] = useState<Set<string>>(() => new Set())
   const [addOrderFor, setAddOrderFor] = useState<string | null>(null)
   const [symbol, setSymbol] = useState('BTC'),
@@ -69,7 +71,8 @@ export default function App() {
       setScenario(null)
       setEditor(null)
       setSettings(false)
-      setPlan({ ...defaultPlan })
+      setPlan(newPlanDraft())
+      setScenarioPlan(null)
       setSelectedOrderIds(new Set())
       setAddOrderFor(null)
     } else {
@@ -203,7 +206,12 @@ export default function App() {
             'Compare your live portfolio with a hypothetical price move.',
             '对比实时投资组合与模拟价格下的表现。',
           )
-        : t('Your Bitget accounts, valued in USDT.', '以 USDT 计价的 Bitget 账户总览。')
+        : ready && active.length === 0
+          ? t(
+              'Add a spot wallet, margin account, isolated perpetual, or crypto loan to track your portfolio.',
+              '添加普通现货账户、杠杆账户、逐仓永续合约仓位或质押借币订单，即可查看投资组合表现。',
+            )
+          : t('Your Bitget accounts, valued in USDT.', '以 USDT 计价的 Bitget 账户总览。')
       : page === 'Accounts'
         ? t(
             'Manage your spot wallets, margin accounts, perpetual positions, and loan orders.',
@@ -237,7 +245,14 @@ export default function App() {
           <span className="nav-divider" />
           <nav aria-label={t('Main navigation', '主导航')}>
             {pages.map(({ name, chinese, icon: Icon }) => (
-              <button className={page === name ? 'active' : ''} key={name} onClick={() => setPage(name)}>
+              <button
+                className={page === name ? 'active' : ''}
+                key={name}
+                onClick={() => {
+                  if (name === 'Cash planner') setScenarioPlan(null)
+                  setPage(name)
+                }}
+              >
                 <Icon size={16} />
                 {t(name, chinese)}
               </button>
@@ -316,6 +331,12 @@ export default function App() {
                 </button>
               ) : (
                 <>
+                  {ready && active.length === 0 && (
+                    <button className="btn primary" onClick={add}>
+                      <Plus size={16} />
+                      {t('Add your first account', '添加第一个账户')}
+                    </button>
+                  )}
                   {records.scenarios.length > 0 && (
                     <LoadScenario scenarios={records.scenarios} onLoad={setScenario} />
                   )}
@@ -335,7 +356,7 @@ export default function App() {
                     {t('Refresh', '刷新')}
                   </button>
                   <button
-                    className="btn primary"
+                    className={active.length ? 'btn primary' : 'btn'}
                     onClick={startSimulation}
                     title={
                       market.asOf
@@ -411,13 +432,24 @@ export default function App() {
             liveBook={market.book}
             records={records}
             onRecords={applyRecords}
-            onPlan={() => setPage('Cash planner')}
+            onPlan={() => {
+              setScenarioPlan(newPlanDraft(planFromScenario(scenario)))
+              setPage('Cash planner')
+            }}
           />
         ) : page === 'Cash planner' ? (
           <Planner
-            form={plan}
-            setForm={setPlan}
+            key={scenarioPlan ? 'scenario-plan' : 'standalone-plan'}
+            draft={scenarioPlan ?? plan}
+            setDraft={
+              scenarioPlan
+                ? (change) => setScenarioPlan((current) =>
+                    current && (typeof change === 'function' ? change(current) : change),
+                  )
+                : setPlan
+            }
             book={market.book}
+            asOf={market.asOf}
             quoteStatus={market.universeStatus}
             state={records}
             onRecords={applyRecords}
@@ -449,15 +481,17 @@ export default function App() {
               loading={loading}
               refreshKey={request}
             />
-            <Accounts
-              risk={risk}
-              market={market}
-              records={records}
-              onRecords={applyRecords}
-              onAdd={add}
-              onEdit={edit}
-              onAddOrder={setAddOrderFor}
-            />
+            {active.length > 0 && (
+              <Accounts
+                risk={risk}
+                market={market}
+                records={records}
+                onRecords={applyRecords}
+                onAdd={add}
+                onEdit={edit}
+                onAddOrder={setAddOrderFor}
+              />
+            )}
             <RiskSummary risk={risk} />
           </div>
         )}

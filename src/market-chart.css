@@ -4,6 +4,7 @@
   min-width: 0;
 }
 .market-plot {
+  isolation: isolate;
   width: 100%;
   height: var(--market-chart-height, 260px);
   min-height: 180px;
@@ -49,6 +50,7 @@
 }
 .market-empty {
   position: absolute;
+  z-index: 1;
   left: 12px;
   right: 12px;
   top: 47%;

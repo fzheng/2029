@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   type AccountView,
   clearPortfolio,
+  deletePlan,
   exportBackup,
   importBackup,
   loadPortfolio,
@@ -161,6 +162,7 @@ test('invalid display orders are rejected atomically on save and import', async 
 test('invalid backup is rejected before any write', async () => {
   const before = await loadPortfolio()
   const backup = parseBackup(exportBackup(before))
+  assert.throws(() => parseBackup('{"accounts":'), /valid JSON/)
   for (const invalid of [
     { ...backup, version: 0 },
     { ...backup, accounts: [account, account] },
@@ -170,6 +172,36 @@ test('invalid backup is rejected before any write', async () => {
   ])
     assert.throws(() => parseBackup(JSON.stringify(invalid)))
   assert.deepEqual(await loadPortfolio(), before)
+})
+
+test('a saved frozen funding plan restores its price bases, overrides and quote age across backup import', async () => {
+  const before = await loadPortfolio()
+  const snapshot = {
+    book: { spot: { BTC: '60000', ETH: '2000' }, mark: { ETH: '2001' }, loan: { ETH: '1999' } },
+    asOf: timestamp,
+    stale: ['loan:ETH'],
+    overrides: { ETH: '700.00000001' },
+  }
+  const frozen = { id: 'frozen-plan', name: 'ETH override', data: { target: '35000', path: 'Severe', snapshot } }
+  const saved = await savePlan(frozen, before.revision)
+  const backup = parseBackup(exportBackup(saved))
+  for (const invalid of [
+    { ...snapshot, book: { ...snapshot.book, mark: { ETH: '-2001' } } },
+    { ...snapshot, stale: ['future:ETH'] },
+    // A frozen plan prices BTC from its own target and uses USDT as its unit of account.
+    { ...snapshot, overrides: { BTC: '44000' } },
+    { ...snapshot, overrides: { USDT: '0.9' } },
+  ]) {
+    const badPlan = { ...frozen, data: { ...frozen.data, snapshot: invalid } }
+    assert.throws(() => parseBackup(JSON.stringify({ ...backup, plans: [badPlan] })), /invalid/)
+    await assert.rejects(savePlan(badPlan, saved.revision), /valid inputs/)
+  }
+  assert.deepEqual(await loadPortfolio(), saved)
+  const cleared = await clearPortfolio(saved.revision)
+  const restored = await importBackup(backup, cleared.revision)
+  assert.deepEqual(restored.plans.find((p) => p.id === frozen.id), frozen)
+  assert.deepEqual(restored.accounts, before.accounts)
+  assert.equal(restored.lastBalanceEdit, before.lastBalanceEdit)
 })
 
 test('perpetual tier schedules survive archive, restore, and export; an invalid tier or loan setting is rejected', async () => {
@@ -490,4 +522,57 @@ test('invalid orders and incompatible contract changes are rejected atomically',
   const removed = await removePendingOrders([sell.id], updated.revision)
   const replaced = await saveAccount({ ...contract, asset: 'SOL' }, removed.revision)
   assert.deepEqual(replaced.pendingOrders, [])
+})
+
+test('plan edits preserve IDs, require confirmation for matching names, and reject stale deletes', async () => {
+  const initial = await importBackup(
+    { app: '2029', version: 1, accounts: [account], scenarios: [scenario], plans: [], lastBalanceEdit: timestamp },
+    (await loadPortfolio()).revision,
+  )
+  const saved = await savePlan({ ...plan, name: ' Target ' }, initial.revision)
+  assert.deepEqual(saved.plans, [plan])
+  const edited = { ...plan, data: { ...plan.data, target: '31000', budget: '25.001' } }
+  await assert.rejects(savePlan(edited, saved.revision), /Confirm/)
+  await assert.rejects(savePlan({ ...edited, id: 'new', name: ' ＴＡＲＧＥＴ ' }, saved.revision), /Confirm/)
+  assert.deepEqual(await loadPortfolio(), saved)
+
+  const confirmed = await savePlan(edited, saved.revision, { overwriteId: plan.id })
+  const renamed = { ...edited, name: '另一目标' }
+  const updated = await savePlan(renamed, confirmed.revision)
+  assert.deepEqual(updated.plans, [renamed])
+  await assert.rejects(deletePlan(plan.id, confirmed.revision), /changed/)
+  const removed = await deletePlan(plan.id, updated.revision)
+  await assert.rejects(savePlan(renamed, updated.revision, { overwriteId: plan.id }), /changed/)
+  await assert.rejects(deletePlan(plan.id, removed.revision), /no longer exists/)
+  assert.deepEqual(await loadPortfolio(), removed)
+  assert.deepEqual(parseBackup(exportBackup(removed)), parseBackup(exportBackup(initial)))
+})
+
+test('legacy namesakes stay independently addressable when overwriting or deleting a funding plan', async () => {
+  const second = { ...plan, id: 'second', data: { ...plan.data, target: '39000' } }
+  const source = { ...plan, id: 'source', name: 'Another target' }
+  const legacy = parseBackup(JSON.stringify({
+    app: '2029',
+    version: 1,
+    accounts: [account],
+    scenarios: [scenario],
+    plans: [plan, second, source],
+    lastBalanceEdit: timestamp,
+  }))
+  const initial = await importBackup(legacy, (await loadPortfolio()).revision)
+  const incoming = { id: 'new', name: 'TARGET', data: { ...plan.data, path: 'Severe' } }
+  for (const overwriteId of ['missing', source.id]) {
+    await assert.rejects(savePlan(incoming, initial.revision, { overwriteId }), /no longer matches/)
+  }
+  assert.deepEqual(await loadPortfolio(), initial)
+  const replaced = await savePlan(incoming, initial.revision, { overwriteId: second.id })
+  assert.deepEqual(replaced.plans, [plan, { ...incoming, id: second.id }, source])
+  const renamed = { ...source, name: plan.name, data: { ...source.data, target: '42000' } }
+  const merged = await savePlan(renamed, replaced.revision, { overwriteId: plan.id })
+  assert.deepEqual(merged.plans, [{ ...renamed, id: plan.id }, { ...incoming, id: second.id }])
+  const removed = await deletePlan(second.id, merged.revision)
+  assert.deepEqual(parseBackup(exportBackup(removed)).plans, [{ ...renamed, id: plan.id }])
+  assert.deepEqual(removed.accounts, initial.accounts)
+  assert.deepEqual(removed.scenarios, initial.scenarios)
+  assert.equal(removed.lastBalanceEdit, initial.lastBalanceEdit)
 })
